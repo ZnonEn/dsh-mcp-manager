@@ -24,7 +24,7 @@ DSH（DeepSeek Harness）插件：在桌面端设置页里管理 MCP 服务器�
 - **新建 profile 的 `cordis.patch.yml` 内容就是一个 `[]`**（顶层 flow 空数组）。往里追加 `- insert:` 会产生「同一文档里既有 flow 序列又有 block 序列」的非法 YAML，必须**原地展开那一行**；删掉最后一个条目后要把 `[]` 补回去。`parseYamlSubset` 也要能解析顶层 flow 集合（测试里有对应用例）。
 - **profile 定位不能只看一种来源。** 桌面端把 profile 目录作为位置参数传进来（`dsh-desktop-host ... <profileDir> <runtime...>`）；CLI 用 `--profile <name>`；而进程环境里的 `DSH_PROFILE_DIR` 可能是别的 profile 留下的旧值（实测被它带偏过）。三处都要认，并用 live patch id 指纹兜底。
 - 客户端 bundle **只允许** `require('react')`；测试里有一条断言盯着这一点。
-- **客户端配色只走 `--dsw-alias-*` token，禁止写死前景色。** 官方主题表里 `--dsw-alias-brand-primary` 在**暗色**下是近白色（`neutral-bluish-50`）、**浅色**下是近黑色（`bluish-1000`），所以「填充 + 文字」必须成对取 token：主按钮 = `background: brand-primary` + `color: label-primary-inverted`、hover 用 `button-primary-hover`（正是 DSH 自己 `.primary` 的写法）。历史 bug：写死 `color:#fff` 配 `background:brand-primary` → 暗色下白底白字，按钮变成一块白板；且通用 `.mm-btn:hover:not(:disabled)` 特异性更高抢走了底色，只有鼠标悬停时才「碰巧」看得见文字。**变体按钮的 hover 规则必须写在通用 hover 之后**（同级特异性靠书写顺序取胜），surface 的 token 兜底也要用主题中性色（不能是 `#fff`/`#fafafa`）。
+- **客户端配色只走 `--dsw-alias-*` token，禁止写死前景色，也不要用填充式主按钮。** 官方主题表里 `--dsw-alias-brand-primary` 在**暗色**下是近白色（`neutral-bluish-50`）、**浅色**下是近黑色（`bluish-1000`）—— 它不是「品牌蓝」，拿它当按钮底色在暗色下就是一块白板（历史 bug：还配了写死的 `color:#fff` → 白底白字；而通用 `.mm-btn:hover:not(:disabled)` 特异性 (0,3,0) 高于变体规则，只有鼠标悬停时才「碰巧」看得见文字）。现在所有按钮统一走描边款 `.mm-btn`。surface 的 token 兜底也要用主题中性色（不能是 `#fff`/`#fafafa`）。
 
 ## Build / verify
 

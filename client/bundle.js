@@ -28,11 +28,9 @@ window.__ModuleLoader__.load({
       ".mm-btn { border:1px solid var(--dsw-alias-border-l2, #d5d5d5); border-radius:8px; background:transparent; color:var(--dsw-alias-label-primary, #222); padding:6px 14px; font-size:13px; cursor:pointer; font-family:inherit; white-space:nowrap; transition:background .15s ease, border-color .15s ease; }",
       ".mm-btn:hover:not(:disabled) { background:var(--dsw-alias-bg-layer-2, rgba(127,127,127,.08)); }",
       ".mm-btn:disabled { opacity:.5; cursor:default; }",
-      /* 主按钮：底色用 brand-primary，文字必须用 label-primary-inverted。 */
-      /* 暗色主题下 brand-primary 是近白色（official 主题表：bluish-50），写死 #fff 会白底白字、按钮变成一块白板。 */
-      /* hover 必须用同级特异性的规则盖住通用 .mm-btn:hover 的底色，否则填充会被换成 bg-layer-2。 */
-      ".mm-btn-primary { background:var(--dsw-alias-brand-primary, #4f8cff); border-color:var(--dsw-alias-brand-primary, #4f8cff); color:var(--dsw-alias-label-primary-inverted, #fff); }",
-      ".mm-btn-primary:hover:not(:disabled) { background:var(--dsw-alias-button-primary-hover, var(--dsw-alias-brand-primary, #4f8cff)); border-color:var(--dsw-alias-button-primary-hover, var(--dsw-alias-brand-primary, #4f8cff)); }",
+      /* 这里刻意没有「填充式主按钮」：暗色主题下 --dsw-alias-brand-primary 是近白色，
+       * 拿它当底色只会得到一块白板（历史 bug：还配了写死的 #fff 文字，白底白字）。
+       * 所有按钮统一走描边款，跟设置页里其它按钮一致。 */
       ".mm-btn-danger { color:var(--dsw-alias-state-error-primary, #d64545); border-color:var(--dsw-alias-state-error-primary, #d64545); }",
       ".mm-btn-sm { padding:4px 10px; font-size:12px; border-radius:7px; }",
       ".mm-notice { border:1px solid var(--dsw-alias-border-l2, #e5e5e5); border-left:3px solid var(--dsw-alias-brand-primary, #4f8cff); border-radius:6px; padding:8px 12px; font-size:12px; background:var(--dsw-alias-bg-layer-1, rgba(127,127,127,.12)); line-height:1.6; }",
@@ -284,7 +282,7 @@ window.__ModuleLoader__.load({
         ) : null,
         React.createElement("div", { className: "mm-foot" },
           React.createElement("button", { className: "mm-btn", onClick: props.onCancel, disabled: busy }, "取消"),
-          React.createElement("button", { className: "mm-btn mm-btn-primary", onClick: props.onSave, disabled: busy },
+          React.createElement("button", { className: "mm-btn", onClick: props.onSave, disabled: busy },
             busy ? "保存中…" : (isEdit ? "保存修改" : "添加服务器"))
         )
       )
@@ -461,7 +459,7 @@ window.__ModuleLoader__.load({
             React.createElement("button", { className: "mm-btn", onClick: showRaw, disabled: busy }, "查看配置文件"),
             React.createElement("button", { className: "mm-btn", onClick: function () { load(false) }, disabled: busy }, busy ? "刷新中…" : "刷新"),
             React.createElement("button", {
-              className: "mm-btn mm-btn-primary",
+              className: "mm-btn",
               disabled: busy,
               onClick: function () { setDraft(emptyDraft()); setFormErrors([]) }
             }, "新增服务器")

@@ -141,23 +141,18 @@ function bundleCss() {
   return state.styles[0].textContent
 }
 
-test('主按钮前景色走 label-primary-inverted，样式表里不写死前景色', () => {
+test('样式表里不写死前景色，也不留填充式主按钮', () => {
   const css = bundleCss()
-  const primary = /\.mm-btn-primary\s*\{([^}]*)\}/.exec(css)
-  assert.ok(primary, '应当有 .mm-btn-primary 规则')
-  assert.match(primary[1], /color:var\(--dsw-alias-label-primary-inverted/)
   // 任何 color: 声明都不许是硬编码颜色：硬编码浅色在暗色主题下会隐形
   assert.deepEqual([...css.matchAll(/(?:^|[;{\s])color:\s*(?:#|rgba?\()/gi)].map((m) => m[0]), [])
+  // 填充式主按钮已删除：暗色主题下 brand-primary 是近白色，拿它当底色会变成一块白板
+  assert.doesNotMatch(css, /\.mm-btn-primary/)
 })
 
-test('主按钮 hover 排在通用 hover 之后，底色不会被 .mm-btn:hover 抢走', () => {
+test('没有按钮拿 brand-primary 当填充色（暗色主题下它是近白色）', () => {
   const css = bundleCss()
-  const generic = css.indexOf('.mm-btn:hover:not(:disabled)')
-  const primary = css.indexOf('.mm-btn-primary:hover:not(:disabled)')
-  assert.ok(generic >= 0, '应当有通用 hover 规则')
-  assert.ok(primary >= 0, '应当有主按钮 hover 规则')
-  assert.ok(primary > generic, '同级特异性靠书写顺序取胜，主按钮 hover 必须在后面')
-  assert.match(css.slice(primary), /background:var\(--dsw-alias-button-primary-hover/)
+  const filled = [...css.matchAll(/background:[^;}]*var\(--dsw-alias-brand-primary/gi)].map((m) => m[0])
+  assert.deepEqual(filled, [])
 })
 
 test('承载文字的 surface 兜底色不是不透明浅色', () => {
