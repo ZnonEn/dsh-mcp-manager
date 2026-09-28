@@ -127,3 +127,41 @@ test('bundle 不依赖 Node/构建产物之外的模块', () => {
   const required = [...code.matchAll(/require\(\s*["']([^"']+)["']\s*\)/g)].map((m) => m[1])
   assert.deepEqual([...new Set(required)], ['react'])
 })
+
+/* ---- 主题配色回归：暗色主题下 brand-primary 是近白色 ----------------------
+ * 历史 bug：`.mm-btn-primary` 写死 `color:#fff` 配 `background:brand-primary`，
+ * 而暗色主题的 brand-primary 解析成近白色（官方主题表 neutral-bluish-50），
+ * 于是按钮变成一块白板、文字不可见；hover 时底色又被通用 `.mm-btn:hover`
+ * 盖成 bg-layer-2，才「碰巧」看得见 —— 正是用户看到的现象。三条用例盯着它。 */
+
+function bundleCss() {
+  const state = loadBundle()
+  const mod = state.loaded.factory(fakeRequire)
+  mod.apply({ effect(fn) { return fn() }, get() { return undefined } })
+  return state.styles[0].textContent
+}
+
+test('主按钮前景色走 label-primary-inverted，样式表里不写死前景色', () => {
+  const css = bundleCss()
+  const primary = /\.mm-btn-primary\s*\{([^}]*)\}/.exec(css)
+  assert.ok(primary, '应当有 .mm-btn-primary 规则')
+  assert.match(primary[1], /color:var\(--dsw-alias-label-primary-inverted/)
+  // 任何 color: 声明都不许是硬编码颜色：硬编码浅色在暗色主题下会隐形
+  assert.deepEqual([...css.matchAll(/(?:^|[;{\s])color:\s*(?:#|rgba?\()/gi)].map((m) => m[0]), [])
+})
+
+test('主按钮 hover 排在通用 hover 之后，底色不会被 .mm-btn:hover 抢走', () => {
+  const css = bundleCss()
+  const generic = css.indexOf('.mm-btn:hover:not(:disabled)')
+  const primary = css.indexOf('.mm-btn-primary:hover:not(:disabled)')
+  assert.ok(generic >= 0, '应当有通用 hover 规则')
+  assert.ok(primary >= 0, '应当有主按钮 hover 规则')
+  assert.ok(primary > generic, '同级特异性靠书写顺序取胜，主按钮 hover 必须在后面')
+  assert.match(css.slice(primary), /background:var\(--dsw-alias-button-primary-hover/)
+})
+
+test('承载文字的 surface 兜底色不是不透明浅色', () => {
+  const css = bundleCss()
+  const hardcoded = [...css.matchAll(/background:[^;}]*#(?:fff|ffffff|fafafa|f5f5f5)\b/gi)].map((m) => m[0])
+  assert.deepEqual(hardcoded, [], 'token 缺失时会退化成白底白字，兜底必须是主题中性的')
+})
