@@ -33,7 +33,7 @@ const SAMPLE = [
 ].join('\n')
 
 /** 用真实的临时目录 + 临时 profile 环境变量跑一遍 host 半边。 */
-function setup(services) {
+function setup(services, config) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'dsh-mcp-manager-test-'))
   const file = path.join(dir, 'cordis.patch.yml')
   fs.writeFileSync(file, SAMPLE, 'utf8')
@@ -52,7 +52,7 @@ function setup(services) {
     get(name) { return services ? services[name] : undefined },
     logger: { info() {}, warn() {}, error() {} },
   }
-  plugin.apply(ctx, {})
+  plugin.apply(ctx, config || {})
 
   return {
     dir,
@@ -271,15 +271,20 @@ test('POST toggle：没有 pluginManager 时写 disabled 键', async () => {
     const res = await invoke(env.routes, '/mcp-manager/toggle', 'POST', { id: 'mcp-comfy', enabled: false })
     assert.equal(res.status, 200, JSON.stringify(res.json))
     assert.equal(res.json.restartRequired, true)
-    assert.match(env.read(), /\n {6}disabled: true\n/)
+    // 停用状态写成「顶层 - id: X + disabled: true」覆盖项 —— 与 DSH 官方 writePluginEnabled 同款形式
+    assert.match(env.read(), /^- id: mcp-comfy\n {2}disabled: true$/m)
 
     const state = await invoke(env.routes, '/mcp-manager/state', 'GET')
     assert.equal(state.json.servers[0].disabled, true)
+    assert.equal(state.json.servers[0].disabledSource, 'top-level')
     assert.equal(state.json.servers[0].sync, 'disabled')
 
     const back = await invoke(env.routes, '/mcp-manager/toggle', 'POST', { id: 'mcp-comfy', enabled: true })
     assert.equal(back.status, 200)
-    assert.equal(/\n {6}disabled: true\n/.test(env.read()), false)
+    assert.equal(/- id: mcp-comfy\n {2}disabled: true/.test(env.read()), false)
+    // 只剩 id + disabled 的覆盖项应当整项删除（insert 里的条目本身不能被误删）
+    assert.equal(/^- id: mcp-comfy$/m.test(env.read()), false)
+    assert.match(env.read(), /^ {4}- id: mcp-comfy$/m)
   } finally {
     env.cleanup()
   }
@@ -314,8 +319,9 @@ test('POST toggle：有 pluginManager 时热生效，并标记 live 状态', asy
     assert.deepEqual(calls, [['mcp-comfy', false]])
     assert.equal(res.json.applied, 'applied')
     assert.equal(res.json.restartRequired, false)
-    // 立即生效时不应往文件里塞 disabled 键
-    assert.equal(/\n {6}disabled: true\n/.test(env.read()), false)
+    // 即使热停用成功，也要自己把状态落盘：官方对 insert 内的条目不会持久化，
+    // 否则重启后服务器会"复活"
+    assert.match(env.read(), /^- id: mcp-comfy\n {2}disabled: true$/m)
   } finally {
     env.cleanup()
   }
@@ -327,6 +333,32 @@ test('GET raw：返回配置文件原文', async () => {
     const res = await invoke(env.routes, '/mcp-manager/raw', 'GET')
     assert.equal(res.status, 200)
     assert.equal(res.json.text, SAMPLE)
+  } finally {
+    env.cleanup()
+  }
+})
+
+test('POST toggle：pluginManager 卡住时超时降级，不挂死请求', async () => {
+  const services = {
+    pluginManager: {
+      async listPlugins() {
+        return [{ entryId: 'mcp-comfy', patchId: 'mcp-comfy', moduleName: '@deepseek-ai/dsh-mcp-client', enabled: true, fiberPhase: 'loading' }]
+      },
+      // 官方实现会 await reload：条目卡在 MCP 握手时可能长时间不返回（实测 toggle 挂死过）
+      setPluginEnabled() { return new Promise(() => {}) },
+    },
+  }
+  const env = setup(services, { setPluginEnabledTimeoutMs: 300 })
+  try {
+    const started = Date.now()
+    const res = await invoke(env.routes, '/mcp-manager/toggle', 'POST', { id: 'mcp-comfy', enabled: false })
+    assert.equal(res.status, 200, JSON.stringify(res.json))
+    assert.equal(res.json.applied, 'pending')
+    assert.equal(res.json.restartRequired, true)
+    assert.match(res.json.note, /还在连接中/)
+    assert.equal(Date.now() - started < 5000, true, '不应挂死')
+    // 超时同样要把状态落盘（否则重启后服务器会复活）
+    assert.match(env.read(), /^- id: mcp-comfy\n {2}disabled: true$/m)
   } finally {
     env.cleanup()
   }

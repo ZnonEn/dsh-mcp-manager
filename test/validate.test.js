@@ -10,7 +10,7 @@ test('stdio：合法配置只保留用户填过的字段', () => {
     serverName: 'comfy',
     transport: 'stdio',
     command: 'D:\\ComfyUI-aki-v3.2\\python\\Scripts\\comfy-mcp.exe',
-    args: '-y\npkg\n\n# 注释行会被忽略',
+    args: '-y\npkg\n\n# 这也是合法参数',
     env: 'COMFY_BIN=D:\\ComfyUI-aki-v3.2\\python\\Scripts\\comfy.exe\nEMPTY=',
     cwd: 'D:\\work',
     toolCallTimeoutMs: '600000',
@@ -22,7 +22,7 @@ test('stdio：合法配置只保留用户填过的字段', () => {
     serverName: 'comfy',
     transport: 'stdio',
     command: 'D:\\ComfyUI-aki-v3.2\\python\\Scripts\\comfy-mcp.exe',
-    args: ['-y', 'pkg'],
+    args: ['-y', 'pkg', '# 这也是合法参数'],
     env: { COMFY_BIN: 'D:\\ComfyUI-aki-v3.2\\python\\Scripts\\comfy.exe', EMPTY: '' },
     cwd: 'D:\\work',
     toolCallTimeoutMs: 600000,
@@ -61,11 +61,16 @@ test('streamable-http：必须 http(s) url', () => {
   assert.equal(badScheme.ok, false)
 })
 
-test('布尔与数值边界', () => {
-  const badTimeout = validateServer({ serverName: 'a', transport: 'stdio', command: 'node', toolCallTimeoutMs: '10' })
-  assert.equal(badTimeout.ok, false)
-  const floatTimeout = validateServer({ serverName: 'a', transport: 'stdio', command: 'node', toolCallTimeoutMs: '1.5' })
-  assert.equal(floatTimeout.ok, false)
+test('数值边界：toolCallTimeoutMs 只要求正数（官方没有上下界，也不要求整数）', () => {
+  for (const value of ['10', '1.5', '1000000000', 60000]) {
+    const res = validateServer({ serverName: 'a', transport: 'stdio', command: 'node', toolCallTimeoutMs: value })
+    assert.equal(res.ok, true, `${value} 应当被接受：${JSON.stringify(res.errors)}`)
+    assert.equal(res.value.config.toolCallTimeoutMs, Number(value))
+  }
+  for (const value of ['0', '-1', 'abc']) {
+    const res = validateServer({ serverName: 'a', transport: 'stdio', command: 'node', toolCallTimeoutMs: value })
+    assert.equal(res.ok, false, `${value} 应当被拒`)
+  }
   // failOnStartupError=false 是官方默认值，不写进文件
   const cleared = validateServer({ serverName: 'a', transport: 'stdio', command: 'node', failOnStartupError: false })
   assert.equal(cleared.ok, true)
@@ -75,6 +80,32 @@ test('布尔与数值边界', () => {
   assert.equal('maxInstructionBytes' in def.value.config, false)
   const custom = validateServer({ serverName: 'a', transport: 'stdio', command: 'node', maxInstructionBytes: '1024' })
   assert.equal(custom.value.config.maxInstructionBytes, 1024)
+})
+
+test('reconnect：按官方边界校验（越界会被插件加载期抛错，必须提前拦住）', () => {
+  const cases = [
+    [{ initialDelayMs: '0' }, /initialDelayMs/],
+    [{ initialDelayMs: '-5' }, /initialDelayMs/],
+    [{ initialDelayMs: String(2147483648) }, /initialDelayMs/],
+    [{ maxDelayMs: '0' }, /maxDelayMs/],
+    [{ maxAttempts: '2.5' }, /maxAttempts/],
+    [{ maxAttempts: '0' }, /maxAttempts/],
+    [{ maxAttempts: 'abc' }, /maxAttempts/],
+  ]
+  for (const [reconnect, pattern] of cases) {
+    const res = validateServer({ serverName: 'a', transport: 'stdio', command: 'node', reconnect })
+    assert.equal(res.ok, false, `${JSON.stringify(reconnect)} 应当被拒`)
+    assert.match(res.errors.join('|'), pattern)
+  }
+  // 上界恰好取到官方上限：合法
+  const atLimit = validateServer({
+    serverName: 'a',
+    transport: 'stdio',
+    command: 'node',
+    reconnect: { initialDelayMs: '2147483647', maxDelayMs: '1', maxAttempts: '1' },
+  })
+  assert.equal(atLimit.ok, true, JSON.stringify(atLimit.errors))
+  assert.deepEqual(atLimit.value.config.reconnect, { initialDelayMs: 2147483647, maxDelayMs: 1, maxAttempts: 1 })
 })
 
 test('reconnect：只在用户配置时写入', () => {

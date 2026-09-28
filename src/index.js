@@ -17,9 +17,10 @@
  *  · 热禁用：`pluginManager.setPluginEnabled(entryId, enabled)`（官方路径，
  *    立即生效）；没有 pluginManager 时退化为写 `disabled:` 键（重启生效）。
  *
- * 注意：新增/修改/删除条目写的是**配置文件**，DSH 的 Loader 不会热重载
- * profile patch，所以这三类操作需要重启 DSH 才生效 —— 接口把这件事如实
- * 返回给 UI（`restartRequired`），不假装已经生效。
+ * 注意：新增/修改/删除条目写的是**配置文件**。DSH 会监视该文件并热加载
+ * （实测约 2–6 秒），但时序不保证；所以每次写盘后都用 `probeLiveAfterWrite`
+ * 实测探测 fiber 状态，把「已生效 / 加载失败 / 无法确认 / 待生效」如实返回给 UI，
+ * 既不谎报已生效，也不一律要求重启。写盘前自动备份，写后做结构自检，不通过就整份回滚。
  */
 
 const fs = require('node:fs')
@@ -134,6 +135,10 @@ module.exports = {
       ? options.moduleName.trim()
       : patchFile.MCP_CLIENT_MODULE
     const logger = ctx.logger
+    /** pluginManager.setPluginEnabled 的等待上限（毫秒）；条目卡在 MCP 握手时会等很久。 */
+    const mutateTimeoutMs = Number.isFinite(options.setPluginEnabledTimeoutMs)
+      ? options.setPluginEnabledTimeoutMs
+      : 8000
 
     let profileCache = null
     let writeChain = Promise.resolve()
@@ -231,22 +236,38 @@ module.exports = {
     function writePatchText(nextText, expectEntryId) {
       const profile = resolveProfile(false)
       const file = profile.file
+      const previous = fs.readFileSync(file, 'utf8')
       backup(file)
       const tmp = `${file}.tmp-mcp-manager`
       fs.writeFileSync(tmp, nextText, 'utf8')
       fs.renameSync(tmp, file)
-      // 回读校验：确认落盘内容里能读回目标条目，读不回就当作写失败抛错
-      const verifyText = fs.readFileSync(file, 'utf8')
-      const entries = patchFile.listMcpEntries(verifyText, moduleName)
-      if (expectEntryId && !entries.some((e) => e.id === expectEntryId)) {
-        throw new Error(`写入后回读校验失败：文件里没有条目 ${expectEntryId}`)
-      }
-      for (const e of entries) {
-        if (e.parseError) {
-          log('warn', `[mcp-manager] 条目 ${e.id} 写入后无法解析：${e.parseError}`)
+      try {
+        const verifyText = fs.readFileSync(file, 'utf8')
+        // 结构自检：DSH 对无法解析的 profile patch 是**启动期硬失败**
+        // （"must fail loud at boot, never be silently skipped"），
+        // 所以"条目能读出来"远远不够 —— 必须确认它落在结构正确的独立 insert 块里。
+        const safe = patchFile.assertSafePatch(verifyText, expectEntryId)
+        if (!safe.ok) throw new Error(`写入后结构自检失败：${safe.problem}`)
+        const entries = patchFile.listMcpEntries(verifyText, moduleName)
+        if (expectEntryId && !entries.some((e) => e.id === expectEntryId)) {
+          throw new Error(`写入后回读校验失败：文件里没有条目 ${expectEntryId}`)
         }
+        for (const e of entries) {
+          if (e.parseError) log('warn', `[mcp-manager] 条目 ${e.id} 解析告警：${e.parseError}`)
+        }
+        return { file, entries }
+      } catch (e) {
+        // 绝不留坏文件：校验没过就整份回滚到写入前的内容
+        try {
+          const rollbackTmp = `${file}.tmp-mcp-manager-rollback`
+          fs.writeFileSync(rollbackTmp, previous, 'utf8')
+          fs.renameSync(rollbackTmp, file)
+          log('warn', `[mcp-manager] 写入校验失败，已回滚 ${file}：${messageOf(e)}`)
+        } catch (rollbackError) {
+          log('error', `[mcp-manager] 回滚失败，${file} 可能已损坏：${messageOf(rollbackError)}`)
+        }
+        throw new Error(`${messageOf(e)}（已回滚到写入前的内容）`)
       }
-      return { file, entries }
     }
 
     function withLock(fn) {
@@ -265,23 +286,49 @@ module.exports = {
       }
     }
 
+    /** 给可能长时间不返回的宿主调用加个上限（例如条目卡在 MCP 握手时 reload 会等很久）。 */
+    function withTimeout(promise, ms, label) {
+      return new Promise((resolve, reject) => {
+        const timer = setTimeout(() => reject(new Error(`${label} 未在 ${ms}ms 内返回`)), ms)
+        Promise.resolve(promise).then(
+          (value) => { clearTimeout(timer); resolve(value) },
+          (error) => { clearTimeout(timer); reject(error) },
+        )
+      })
+    }
+
     /**
-     * 写盘后短暂轮询，确认 DSH 是否真的把这次改动热加载进来了。
+     * 写盘后探测 DSH 是否真的把这次改动热加载进来了。
+     *
      * 实测：DSH 会监视 cordis.patch.yml 并热应用，但**不是瞬间的** ——
-     * 写入后大约 2–6 秒条目才进入运行树（14x 次实测中 1.5s 常常还没生效）。
-     * 所以这里给 3 秒窗口：等到了就说"已生效"，没等到就保守地说"可能需要重启"，
-     * 而不是把一次探测的结果当成定论。
-     * 没有 pluginManager 时返回 false（无法确认 → 按最保守的说法提示）。
+     * 写入后大约 2–6 秒条目才进入运行树，所以给 3 秒窗口。更关键的是**不只看"在不在"**：
+     *   · fiberPhase === 'active' 才算真正加载成功；
+     *   · 'failed' 表示条目在树里但加载失败 —— 必须如实报出来，不能谎报"已生效"；
+     *   · 编辑一个**本来就在运行**的条目时，旧实例一直都在，探测无法区分新旧配置，
+     *     这种情况直接返回 'unknown'，由调用方保守表述。
+     *
+     * @returns {Promise<'active'|'failed'|'present'|'absent'|'unknown'>}
      */
-    async function confirmLive(entryId, expectPresent, timeoutMs = 3000) {
-      const deadline = Date.now() + timeoutMs
+    async function probeLiveAfterWrite(entryId, mode) {
+      if (mode === 'edited') return 'unknown'
+      const deadline = Date.now() + 3000
+      let last = null
       for (;;) {
         const live = await liveServersNow()
-        if (live === null) return false
-        if ((matchLive(live, entryId) !== null) === expectPresent) return true
-        if (Date.now() >= deadline) return false
+        if (live === null) return 'unknown'
+        const hit = matchLive(live, entryId)
+        last = hit
+        if (mode === 'removed') {
+          if (hit === null) return 'absent'
+        } else if (hit && hit.enabled !== false && hit.phase === 'active') {
+          return 'active'
+        }
+        if (Date.now() >= deadline) break
         await new Promise((resolve) => setTimeout(resolve, 200))
       }
+      if (mode === 'removed') return 'present'
+      if (last && last.phase === 'failed') return 'failed'
+      return last ? 'present' : 'absent'
     }
 
     // ── 状态组装 ──────────────────────────────────────────────────────────
@@ -398,6 +445,10 @@ module.exports = {
       }
       const { id, config: serverConfig } = result.value
 
+      // 改动前该条目是否已经在运行：决定"热加载能否被确认"（在跑的旧实例会掩盖新配置）
+      const beforeLive = await liveServersNow()
+      const wasLive = originalId !== null && beforeLive !== null && matchLive(beforeLive, originalId) !== null
+
       // 改 id：先删旧条目再按新 id 写入，避免留下孤儿条目
       let working = text
       if (originalId && originalId !== id) {
@@ -407,18 +458,22 @@ module.exports = {
       }
       const upserted = patchFile.upsertEntry(working, { id, moduleName, config: serverConfig })
       const written = writePatchText(upserted.text, id)
-      const hot = await confirmLive(id, true)
+      const liveState = await probeLiveAfterWrite(id, wasLive ? 'edited' : 'added')
+      const NOTES = {
+        active: '配置已写入 profile 文件，并且 DSH 已热加载该条目（已生效）。',
+        failed: '配置已写入 profile 文件，但该条目在 DSH 里加载失败（fiber = failed）—— 请检查配置内容或 DSH 日志。',
+        unknown: '配置已写入 profile 文件。该条目原本就在运行，热加载有没有把新配置换上去无法自动确认 —— 要确保生效请重启 DSH。',
+        pending: '配置已写入 profile 文件。DSH 通常会在几秒内自动热加载 —— 设置页会显示最新状态；若一直显示「待重启生效」，重启 DSH 即可。',
+      }
       return {
         ok: true,
         action: upserted.action,
         id,
         file: written.file,
-        restartRequired: !hot,
-        live: hot,
-        // 探测窗口只有几秒，热加载本身可能更慢，所以措辞不把探测结果当定论
-        note: hot
-          ? '配置已写入 profile 文件，并且 DSH 已热加载该条目（已生效）。'
-          : '配置已写入 profile 文件。DSH 通常会在几秒内自动热加载 —— 设置页会自动显示最新状态；若一直显示「待重启生效」，重启 DSH 即可。',
+        restartRequired: liveState !== 'active',
+        live: liveState === 'active',
+        liveState,
+        note: NOTES[liveState] || NOTES.pending,
       }
     }
 
@@ -437,13 +492,16 @@ module.exports = {
       }
       const remaining = patchFile.listMcpEntries(removed.text, moduleName)
       const written = writePatchText(removed.text, remaining.length > 0 ? remaining[0].id : null)
-      const unloaded = wasLive ? await confirmLive(id, false) : false
+      // 只有"删除前它真的在运行"才可能确认卸载；否则不能宣称"已卸载"
+      const liveState = wasLive ? await probeLiveAfterWrite(id, 'removed') : 'unknown'
+      const unloaded = liveState === 'absent'
       return {
         ok: true,
         id,
         file: written.file,
         restartRequired: wasLive && !unloaded,
         live: unloaded,
+        liveState,
         note: unloaded
           ? '条目已从 profile 文件删除，并且已从运行中的 DSH 卸载。'
           : '条目已从 profile 文件删除；它的连接（如果已经建立）会保留到 DSH 重启。',
@@ -470,35 +528,54 @@ module.exports = {
       }
       const live = matchLive(liveServers, id)
 
+      // 1) 尽力走官方热停用。它的实现是「先写 profile patch，再 reload 运行树」，而 reload
+      //    在条目卡住时（例如 MCP 握手一直没完成）会等很久，所以给一个上限。
+      let change = null
+      let hotError = null
       if (live && manager && typeof manager.setPluginEnabled === 'function') {
-        const change = await manager.setPluginEnabled(live.entryId, enabled)
-        // 顺带清掉文件里可能残留的 disabled 键，避免两套状态互相打架
-        const cleaned = patchFile.setEntryDisabled(text, id, !enabled && change && change.application === 'restart-required')
-        if (cleaned.changed) writePatchText(cleaned.text, id)
-        return {
-          ok: true,
-          id,
-          enabled,
-          applied: change ? change.application : null,
-          restartRequired: !!change && change.application === 'restart-required',
-          note: change && change.application === 'applied'
-            ? '已通过 pluginManager 立即生效。'
-            : '已写入启用状态；重启 DSH 后生效。',
+        try {
+          change = await withTimeout(
+            manager.setPluginEnabled(live.entryId, enabled),
+            mutateTimeoutMs,
+            'pluginManager.setPluginEnabled',
+          )
+        } catch (e) {
+          hotError = messageOf(e)
+          log('warn', `[mcp-manager] ${hotError}`)
         }
       }
 
-      const toggled = patchFile.setEntryDisabled(text, id, !enabled)
-      if (!toggled.changed) {
-        return { ok: true, id, enabled, applied: 'noop', restartRequired: false, note: '状态未发生变化。' }
+      // 2) 不管上面结果如何，都保证 profile 文件里的启用状态是对的。
+      //    官方 writePluginEnabled 只在「不含 insert 的顶层项」里按 id 匹配，对 `- insert:`
+      //    内部的 MCP 条目匹配不到就新加顶层项，而且实测并不会在我们的等待窗口内落盘；
+      //    这里用**完全相同的形式**（顶层 `- id: X` + `disabled: true`）把它补齐，
+      //    界面显示与重启后的行为才一致。注意要用**重新读到的最新文本**，别用调用前的旧文本。
+      const latestText = readPatchText()
+      const current = patchFile.listMcpEntries(latestText, moduleName).find((e) => e.id === id)
+      let persisted = false
+      if (current && current.disabled !== !enabled) {
+        const toggled = patchFile.setEntryDisabled(latestText, id, !enabled)
+        if (toggled.changed) {
+          writePatchText(toggled.text, id)
+          persisted = true
+        }
       }
-      writePatchText(toggled.text, id)
+
+      const hotApplied = !!change && change.application === 'applied'
       return {
         ok: true,
         id,
         enabled,
-        applied: 'restart-required',
-        restartRequired: true,
-        note: '已写入 profile 文件的 disabled 键；重启 DSH 后生效。',
+        applied: hotApplied ? 'applied' : (hotError ? 'pending' : 'persisted'),
+        restartRequired: !hotApplied,
+        liveState: hotApplied ? 'active' : 'unknown',
+        note: hotApplied
+          ? '已立即生效；启用状态同时写进了 profile patch（顶层 `- id:` 覆盖项），重启后依然保留。'
+          : hotError
+            ? `启用状态已写入 profile patch（重启后保留）。热停用没在 ${Math.round(mutateTimeoutMs / 1000)} 秒内完成（${hotError}）—— 多半是该服务器还在连接中，稍后刷新看状态。`
+            : (persisted
+                ? '启用状态已写入 profile patch（顶层 `- id:` 覆盖项），重启 DSH 后完全生效。'
+                : '状态未发生变化。'),
       }
     }
 
@@ -535,7 +612,8 @@ module.exports = {
               body = text.trim() === '' ? {} : JSON.parse(text)
             }
             const payload = await handler(body)
-            sendJson(res, payload && payload.statusCode ? payload.statusCode : 200, payload && payload.ok === false && !payload.error ? { ...payload, ok: true } : payload)
+            const status = payload && payload.statusCode ? payload.statusCode : 200
+            sendJson(res, status, payload)
           } catch (e) {
             const status = e && e.statusCode ? e.statusCode : 500
             sendJson(res, status, {

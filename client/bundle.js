@@ -232,7 +232,7 @@ window.__ModuleLoader__.load({
             React.createElement(Field, { label: "启动命令 (command)", hint: "可执行文件或命令名；参数不要写在这里", wide: true },
               React.createElement("input", { className: "mm-input", value: draft.command, onChange: set("command"), placeholder: "D:\\tools\\mcp-server.exe 或 npx" })
             ),
-            React.createElement(Field, { label: "参数 (args)", hint: "每行一个参数，不要加引号" },
+            React.createElement(Field, { label: "参数 (args)", hint: "每行一个参数，不要加引号（空行忽略；# 开头的也是合法参数）" },
               React.createElement("textarea", { className: "mm-textarea", value: draft.args, onChange: set("args"), placeholder: "-y\n@modelcontextprotocol/server-filesystem\nD:\\work" })
             ),
             React.createElement(Field, { label: "环境变量 (env)", hint: "每行 KEY=VALUE" },
@@ -468,7 +468,7 @@ window.__ModuleLoader__.load({
         error ? React.createElement("div", { className: "mm-notice mm-err" }, "出错了：" + error) : null,
         notice ? React.createElement("div", { className: "mm-notice mm-warn" }, notice) : null,
         counts && counts.pending > 0 ? React.createElement("div", { className: "mm-notice mm-warn" },
-          "有 " + counts.pending + " 个服务器只在配置文件里存在，DSH 重启后才会连接。"
+          "有 " + counts.pending + " 个服务器只写在配置文件里、还没进入运行树（DSH 通常会自动热加载；若一直如此就重启 DSH）。"
         ) : null,
         profile && profile.exists === false ? React.createElement("div", { className: "mm-notice mm-warn" },
           "没有找到 cordis.patch.yml。可以先在 DSH 里装任意一个插件让 profile 生成该文件，或检查 profile 目录是否正确。"

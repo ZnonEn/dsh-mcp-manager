@@ -9,7 +9,7 @@
  * 也不会被写坏。
  */
 
-const { indentOf, isComment, stripComment, parseYamlSubset, dumpScalar, dumpYaml } = require('./yaml-mini.js')
+const { indentOf, isComment, stripComment, parseScalar, parseYamlSubset, dumpScalar, dumpYaml } = require('./yaml-mini.js')
 
 /** 默认的 MCP 客户端插件包名（可在插件 config 里覆盖，见 index.js 的 moduleName）。 */
 const MCP_CLIENT_MODULE = '@deepseek-ai/dsh-mcp-client'
@@ -41,6 +41,27 @@ function scanTopLevelBlocks(lines) {
   return blocks
 }
 
+/**
+ * 取顶层项的第一个键（`- key: value` / `- key:`）。
+ * 这是区分「独立 insert 块」与「组定向 insert」的唯一依据：
+ *   - insert:            ← 首键是 insert：可追加的独立 insert 块
+ *   - id: my-group       ← 首键是 id，内部可能还有 `insert:`：
+ *     insert:                官方 applyEntryPatches 支持把它追加进 id 指定的 group，
+ *                            本插件不识别、不改写它。
+ */
+function topItemHead(line) {
+  const raw = stripComment(line).trimEnd()
+  if (raw === '') return null
+  const lead = indentOf(raw)
+  const body = raw.slice(lead)
+  if (body !== '-' && !body.startsWith('- ')) return null
+  const rest = body.slice(1).trim()
+  if (rest === '') return null
+  const m = /^([^:\s][^:]*?)\s*:(?:\s*(.*))?$/.exec(rest)
+  if (!m) return null
+  return { key: m[1].trim(), inlineValue: (m[2] === undefined ? '' : m[2].trim()) }
+}
+
 /** 在 [from, to) 内找第一个内容行的缩进，用于探测子序列缩进。 */
 function detectChildIndent(lines, from, to) {
   for (let i = from; i < to; i++) {
@@ -68,28 +89,26 @@ function scanPatch(text) {
   const entries = []
 
   for (const block of blocks) {
-    // 顶层块里是否有 `insert:` 键。注意 `- insert:` 的键在第 2 列（`- ` 占两列），
-    // 而不是块内普通行的第 2 列 —— 两者都要覆盖。
-    let hasInsert = false
-    for (let i = block.start; i < block.end; i++) {
-      const raw = stripComment(lines[i]).trimEnd()
-      if (raw === '' || isComment(lines[i])) continue
-      const lead = indentOf(raw)
-      const body = raw.slice(lead)
-      const dash = body === '-' || body.startsWith('- ')
-      const keyCol = dash ? lead + body.indexOf('-') + 2 : lead
-      const keyText = dash ? body.slice(body.indexOf('-') + 1).trim() : body
-      if (keyCol === 2 && /^insert\s*:/.test(keyText)) { hasInsert = true; break }
-    }
-    if (!hasInsert) continue
+    // 只认「顶层项的第一个键就是 insert」的独立 insert 块。
+    // 组定向插入（`- id: group` 内部再写 `insert:`）是另一种合法结构（官方
+    // dsh-app-boot 的 applyEntryPatches 会把它追加进 id 指定的 group 条目），
+    // 一旦把它误当成追加目标，生成的行会落在错误缩进上、写出非法 YAML。
+    const head = topItemHead(lines[block.start])
+    if (!head || head.key !== 'insert') continue
 
     const itemIndent = detectChildIndent(lines, block.start + 1, block.end)
     if (itemIndent < 0) {
-      inserts.push({ blockStart: block.start, blockEnd: block.end, itemIndent: 4, insertEnd: block.end })
+      inserts.push({
+        blockStart: block.start,
+        blockEnd: block.end,
+        itemIndent: 4,
+        insertEnd: block.end,
+        inlineValue: head.inlineValue,
+      })
       continue
     }
 
-    let insertEnd = itemIndent >= 0 ? block.start + 1 : block.end
+    let insertEnd = block.start + 1
     for (let i = block.start + 1; i < block.end; i++) {
       const raw = stripComment(lines[i]).trimEnd()
       if (raw === '' || isComment(lines[i])) continue
@@ -97,20 +116,29 @@ function scanPatch(text) {
       const body = raw.slice(itemIndent)
       if (body !== '-' && !body.startsWith('- ')) continue
 
-      // 条目结束行：下一个缩进 <= itemIndent 的内容行
+      // 条目结束行 = 最后一个内容行的下一行。尾部的空行/注释**不**算条目的一部分，
+      // 否则编辑条目会把用户写在它下面的注释一起删掉。
       let j = i + 1
+      let lastContent = i
       for (; j < block.end; j++) {
         const r2 = stripComment(lines[j]).trimEnd()
         if (r2 === '' || isComment(lines[j])) continue
         if (indentOf(r2) <= itemIndent) break
+        lastContent = j
       }
       const keyIndent = itemIndent + Math.max(2, body.indexOf('-') + 2)
-      const entry = readEntry(lines, { start: i, end: j }, itemIndent, keyIndent)
+      const entry = readEntry(lines, { start: i, end: lastContent + 1 }, itemIndent, keyIndent)
       entries.push(entry)
-      insertEnd = j
+      insertEnd = j // 追加位置仍然跳过尾部 trivia（新条目排在已有注释之后）
       i = j - 1
     }
-    inserts.push({ blockStart: block.start, blockEnd: block.end, itemIndent, insertEnd })
+    inserts.push({
+      blockStart: block.start,
+      blockEnd: block.end,
+      itemIndent,
+      insertEnd,
+      inlineValue: head.inlineValue,
+    })
   }
 
   return { lineEnding, lines, inserts, entries }
@@ -196,7 +224,9 @@ function upsertEntry(text, entry) {
     lines.splice(existing.start, existing.end - existing.start, ...gen)
     return { text: lines.join(scanned.lineEnding), action: 'updated' }
   }
-  const target = scanned.inserts[scanned.inserts.length - 1]
+  // 只追加到「值写在下面各行的独立 insert 块」（`- insert:` 后面没有内联值）。
+  // `- insert: []` 这类内联写法不能再往里塞行，否则同样会写出非法 YAML。
+  const target = scanned.inserts.filter((b) => b.inlineValue === '').pop()
   if (target) {
     const gen = genEntryLines(entry, target.itemIndent)
     lines.splice(target.insertEnd, 0, ...gen)
@@ -212,8 +242,12 @@ function upsertEntry(text, entry) {
     lines.splice(emptyArrayLine, 1, '- insert:', ...gen)
     return { text: lines.join(scanned.lineEnding), action: 'created-insert' }
   }
-  while (lines.length > 0 && lines[lines.length - 1].trim() === '') lines.pop()
-  lines.push('', '- insert:', ...gen, '')
+  // 保留文件原有的结尾空行风格：先摘掉尾部空行、插入后再按原样补回，
+  // 这样「新增 → 删除」能回到与原文**字节相等**的状态。
+  const trailing = []
+  while (lines.length > 0 && lines[lines.length - 1].trim() === '') trailing.push(lines.pop())
+  lines.push('', '- insert:', ...gen)
+  for (let i = 0; i < trailing.length; i++) lines.push(trailing[i])
   return { text: lines.join(scanned.lineEnding), action: 'created-insert' }
 }
 
@@ -245,53 +279,157 @@ function removeEntry(text, id) {
     while (lines.length > 0 && lines[lines.length - 1].trim() === '') lines.pop()
     lines.push('[]', '')
   }
-  return { text: lines.join(scanned.lineEnding), removed: true }
+  let result = lines.join(scanned.lineEnding)
+  // 顺带清掉针对该 id 的顶层启用状态覆盖项，别留下指向已删除条目的残渣
+  const cleaned = setEntryDisabled(result, id, false)
+  if (cleaned.changed) result = cleaned.text
+  return { text: result, removed: true }
 }
 
 /**
- * 写 `disabled: true` / 清除该键（同步生效需重启；热禁用请走 pluginManager）。
+ * 写/清「顶层 `- id: X` + `disabled: true`」启用状态覆盖项。
+ *
+ * 为什么必须用这个形式：DSH 官方 `pluginManager.writePluginEnabled` 只在**不含 insert
+ * 的顶层项**里按 id 匹配，匹配不到就新加一个顶层项 —— 也就是说，对 `- insert:` 内部的
+ * MCP 条目，官方把状态记在顶层，往条目内部塞 `disabled:` 键它并不认（实测 toggle 后
+ * 文件毫无变化）。用同一种形式，界面显示与 DSH 实际行为才会一致。
+ *
  * @returns {{ text: string, changed: boolean }}
  */
 function setEntryDisabled(text, id, disabled) {
   const scanned = scanPatch(text)
-  const existing = scanned.entries.find((e) => e.id === id)
-  if (!existing) return { text: String(text), changed: false }
   const lines = scanned.lines.slice()
-  const keyRe = /^disabled\s*:/
-  let keyLine = -1
-  for (let i = existing.start + 1; i < existing.end; i++) {
-    const raw = stripComment(lines[i]).trimEnd()
-    if (raw === '' || isComment(lines[i])) continue
-    if (indentOf(raw) !== existing.keyIndent) continue
-    if (keyRe.test(raw.slice(existing.keyIndent))) { keyLine = i; break }
+
+  let target = null
+  for (const block of scanTopLevelBlocks(lines)) {
+    const head = topItemHead(lines[block.start])
+    if (!head || head.key !== 'id') continue
+    if (blockHasInsertKey(lines, block)) continue
+    if (parseScalar(head.inlineValue) !== id) continue
+    target = block
+    break
   }
-  if (disabled) {
-    const line = `${' '.repeat(existing.keyIndent)}disabled: true`
-    if (keyLine >= 0) {
-      if (lines[keyLine].trim() === 'disabled: true') return { text: String(text), changed: false }
-      lines[keyLine] = line
-    } else {
-      lines.splice(existing.start + 1, 0, line)
+
+  const findDisabledLine = (block) => {
+    if (!block) return -1
+    for (let i = block.start + 1; i < block.end; i++) {
+      const raw = stripComment(lines[i]).trimEnd()
+      if (raw === '' || isComment(lines[i])) continue
+      if (indentOf(raw) !== 2) continue
+      if (/^disabled\s*:/.test(raw.slice(2))) return i
     }
+    return -1
+  }
+
+  if (disabled) {
+    if (target) {
+      const at = findDisabledLine(target)
+      if (at >= 0) {
+        if (stripComment(lines[at]).trimEnd().slice(2).trim() === 'disabled: true') {
+          return { text: String(text), changed: false }
+        }
+        lines[at] = '  disabled: true'
+      } else {
+        lines.splice(target.start + 1, 0, '  disabled: true')
+      }
+      return { text: lines.join(scanned.lineEnding), changed: true }
+    }
+    // 官方同款：新加一个顶层覆盖项（保留文件原有的结尾空行风格）
+    const trailing = []
+    while (lines.length > 0 && lines[lines.length - 1].trim() === '') trailing.push(lines.pop())
+    lines.push(`- id: ${dumpScalar(id)}`, '  disabled: true')
+    for (let i = 0; i < trailing.length; i++) lines.push(trailing[i])
     return { text: lines.join(scanned.lineEnding), changed: true }
   }
-  if (keyLine < 0) return { text: String(text), changed: false }
-  lines.splice(keyLine, 1)
+
+  // disabled = false：清掉这个覆盖项
+  if (!target) return { text: String(text), changed: false }
+  const at = findDisabledLine(target)
+  if (at < 0) return { text: String(text), changed: false }
+  if (countBlockKeys(lines, target) <= 1) {
+    // 该项只有 id + disabled（官方新增的那种），整项删除
+    lines.splice(target.start, target.end - target.start)
+  } else {
+    lines.splice(at, 1)
+  }
   return { text: lines.join(scanned.lineEnding), changed: true }
 }
 
-/** 取出当前文件里所有 MCP 服务器条目（按模块名过滤）。 */
+/**
+ * 顶层项里是否含 `insert:` 键（组定向 insert 或独立 insert 块）。
+ * 官方 writePluginEnabled 只把「不含 insert 的顶层项」当作禁用状态的目标。
+ */
+function blockHasInsertKey(lines, block) {
+  for (let i = block.start; i < block.end; i++) {
+    const raw = stripComment(lines[i]).trimEnd()
+    if (raw === '' || isComment(lines[i])) continue
+    if (indentOf(raw) !== 2) continue
+    if (/^insert\s*:/.test(raw.slice(2))) return true
+  }
+  return false
+}
+
+/**
+ * 收集「顶层 `- id: X` + `disabled:`」形式的启用状态覆盖。
+ *
+ * 这是 DSH 官方的持久化形式 —— `@deepseek-ai/dsh-plugin-manager` 的 writePluginEnabled
+ * 只在**不含 insert 的顶层项**里按 id 匹配，匹配不到就新加一个顶层项。
+ * 也就是说：对 `- insert:` 内部那些 MCP 条目，停用状态是记在**顶层**的，
+ * 而不是写在条目自己的 `disabled:` 键上。
+ * @returns {Map<string, boolean>}
+ */
+function topLevelDisabledState(text) {
+  const scanned = scanPatch(text)
+  const lines = scanned.lines
+  const map = new Map()
+  for (const block of scanTopLevelBlocks(lines)) {
+    const head = topItemHead(lines[block.start])
+    if (!head || head.key !== 'id') continue
+    if (blockHasInsertKey(lines, block)) continue
+    const id = parseScalar(head.inlineValue)
+    if (typeof id !== 'string' || id === '') continue
+    let disabled = null
+    for (let i = block.start + 1; i < block.end; i++) {
+      const raw = stripComment(lines[i]).trimEnd()
+      if (raw === '' || isComment(lines[i])) continue
+      if (indentOf(raw) !== 2) continue
+      const m = /^disabled\s*:\s*(.*)$/.exec(raw.slice(2))
+      if (m) disabled = /^(true|True|TRUE)$/.test(m[1].trim())
+    }
+    if (disabled !== null) map.set(id, disabled)
+  }
+  return map
+}
+
+/** 统计块内第 2 列的键行数（判断顶层项是不是"只有 id 与 disabled"）。 */
+function countBlockKeys(lines, block) {
+  let n = 0
+  for (let i = block.start + 1; i < block.end; i++) {
+    const raw = stripComment(lines[i]).trimEnd()
+    if (raw === '' || isComment(lines[i])) continue
+    if (indentOf(raw) === 2) n++
+  }
+  return n
+}
+
+/** 取出当前文件里所有 MCP 服务器条目（按模块名过滤），disabled 合并顶层覆盖。 */
 function listMcpEntries(text, moduleName = MCP_CLIENT_MODULE) {
   const scanned = scanPatch(text)
+  const topDisabled = topLevelDisabledState(text)
   return scanned.entries
     .filter((e) => e.moduleName === moduleName)
-    .map((e) => ({
-      id: e.id,
-      moduleName: e.moduleName,
-      disabled: e.disabled,
-      config: e.config,
-      parseError: e.parseError,
-    }))
+    .map((e) => {
+      const top = e.id !== null && topDisabled.has(e.id) ? topDisabled.get(e.id) : null
+      return {
+        id: e.id,
+        moduleName: e.moduleName,
+        disabled: e.disabled || top === true,
+        // 停用状态记在哪：条目自己（entry）还是顶层覆盖项（top-level）
+        disabledSource: e.disabled ? 'entry' : (top === true ? 'top-level' : null),
+        config: e.config,
+        parseError: e.parseError,
+      }
+    })
 }
 
 /** 收集文件里所有已占用的条目 id：insert 条目 + 顶层 `- id:` 条目。 */
@@ -321,6 +459,43 @@ function hasEntryId(text, id) {
   return collectEntryIds(text).has(id)
 }
 
+/**
+ * 写盘后的结构自检：确认这份文本里，目标条目位于一个「独立的 `- insert:` 块」内，
+ * 且缩进与块内子项一致。
+ *
+ * 为什么需要它：光看"条目能不能被解析出来"是不够的 —— 即使整个文件已经被写坏
+ * （例如追加到了错误缩进上），`listMcpEntries` 依然能读出条目且 parseError 为 null。
+ * 而 DSH 对无法解析的 profile patch 是**启动期硬失败**（"must fail loud at boot"），
+ * 所以这一关必须挡住，写入方拿到 ok:false 就回滚。
+ *
+ * @returns {{ ok: boolean, problem?: string }}
+ */
+function assertSafePatch(text, entryId) {
+  const scanned = scanPatch(text)
+  if (entryId) {
+    const entry = scanned.entries.find((e) => e.id === entryId)
+    if (!entry) return { ok: false, problem: `写入后文件里找不到条目 ${entryId}` }
+    const block = scanned.inserts.find((b) => entry.start >= b.blockStart && entry.start < b.blockEnd)
+    if (!block) return { ok: false, problem: `条目 ${entryId} 不在任何独立的 insert 块内` }
+    if (block.inlineValue !== '') {
+      return { ok: false, problem: `条目 ${entryId} 落在了带内联值的 insert 块里（第 ${block.blockStart + 1} 行）` }
+    }
+    if (entry.itemIndent !== block.itemIndent) {
+      return { ok: false, problem: `条目 ${entryId} 的缩进（${entry.itemIndent}）与所在 insert 块不一致（${block.itemIndent}）` }
+    }
+  }
+  for (const block of scanned.inserts) {
+    const raw = stripComment(scanned.lines[block.blockStart]).trimEnd()
+    if (indentOf(raw) !== 0) {
+      return { ok: false, problem: `insert 块不在顶层（第 ${block.blockStart + 1} 行缩进 ${indentOf(raw)}）` }
+    }
+    if (block.itemIndent <= 0) {
+      return { ok: false, problem: `insert 块的子项缩进非法（第 ${block.blockStart + 1} 行）` }
+    }
+  }
+  return { ok: true }
+}
+
 module.exports = {
   MCP_CLIENT_MODULE,
   scanPatch,
@@ -332,4 +507,7 @@ module.exports = {
   listMcpEntries,
   collectEntryIds,
   hasEntryId,
+  topItemHead,
+  topLevelDisabledState,
+  assertSafePatch,
 }

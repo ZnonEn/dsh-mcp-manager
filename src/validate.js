@@ -3,18 +3,22 @@
 /**
  * validate —— MCP 服务器配置的校验与规范化。
  *
- * 字段与默认值全部对齐已安装的 `@deepseek-ai/dsh-mcp-client`（0.1.7-rc.2）
- * 的 Schemastery schema：
- *   serverName 必须匹配 [A-Za-z0-9_-]{1,32} 且在本 profile 内唯一；
- *   stdio 要 command，streamable-http 要 url；
- *   args/env/cwd/toolCallTimeoutMs/failOnStartupError/maxInstructionBytes/reconnect 都有默认值，
- *   所以「用户没填」的字段一律**不写进文件**，交给插件用官方默认值。
+ * 全部字段与边界对齐已安装的 `@deepseek-ai/dsh-mcp-client`（0.1.7-rc.2）：
+ *   · serverName 必须匹配 [A-Za-z0-9_-]{1,32} 且在本 profile 内唯一；
+ *   · stdio 要 command，streamable-http 要 url；
+ *   · toolCallTimeoutMs 是 `z.number().default(60000)` —— **没有官方上下界，也不要求整数**，
+ *     这里只要求"大于 0 的有限毫秒数"；
+ *   · reconnect 的边界来自同一处 schema 与 @deepseek-ai/dsh-timeout：
+ *     initialDelayMs / maxDelayMs ∈ [1, MAX_TIMER_DELAY_MS]，maxAttempts 是 ≥1 的整数；
+ *     插件加载时 resolveReconnectPolicy 会再判一次并抛错，所以必须在写盘前拦住；
+ *   · args/env/cwd/failOnStartupError/maxInstructionBytes 都有官方默认值，
+ *     「用户没填」的字段一律**不写进文件**，交给插件用官方默认值。
  */
 
 const SERVER_NAME_RE = /^[A-Za-z0-9_-]{1,32}$/
 const ENTRY_ID_RE = /^[A-Za-z0-9_.-]{1,64}$/
-const TIMEOUT_MIN = 1000
-const TIMEOUT_MAX = 24 * 60 * 60 * 1000
+/** @deepseek-ai/dsh-timeout 导出的定时器上限（与 mcp-client 的 reconnect schema 同一个值）。 */
+const MAX_TIMER_DELAY_MS = 2147483647
 const DEFAULT_MAX_INSTRUCTION_BYTES = 32768
 
 function isPlainObject(v) {
@@ -67,14 +71,16 @@ function normalizeDict(input, label, errors) {
   return out
 }
 
-/** 接受数组或按行文本，统一成字符串数组（忽略空行）。 */
+/** 接受数组或按行文本，统一成字符串数组（只忽略空行）。 */
 function normalizeList(input) {
   if (Array.isArray(input)) return input.map((v) => normString(v)).filter((v) => v !== '')
   if (typeof input === 'string') {
+    // 只丢空行：`#` 开头的字符串是完全合法的参数值（官方 schema 是 z.array(String)），
+    // 之前把它当注释丢掉会静默改变用户写的命令。
     return input
       .split(/\r?\n/)
       .map((v) => v.trim())
-      .filter((v) => v !== '' && !v.startsWith('#'))
+      .filter((v) => v !== '')
   }
   return []
 }
@@ -151,8 +157,9 @@ function validateServer(input, opts = {}) {
   const timeoutRaw = input && input.toolCallTimeoutMs
   if (timeoutRaw !== undefined && timeoutRaw !== null && timeoutRaw !== '') {
     const n = Number(timeoutRaw)
-    if (!Number.isInteger(n) || n < TIMEOUT_MIN || n > TIMEOUT_MAX) {
-      errors.push(`工具调用超时必须是 ${TIMEOUT_MIN}–${TIMEOUT_MAX} 之间的整数毫秒`)
+    // 官方是 z.number().default(60000)：没有上下界、不要求整数
+    if (!Number.isFinite(n) || n <= 0) {
+      errors.push('工具调用超时必须是一个大于 0 的毫秒数（官方默认 60000）')
     } else {
       config.toolCallTimeoutMs = n
     }
@@ -168,16 +175,26 @@ function validateServer(input, opts = {}) {
   }
 
   const reconnect = normalizeIntent(input && input.reconnect)
-  const reconnectKeys = Object.keys(reconnect)
-  if (reconnectKeys.length > 0) {
+  if (Object.keys(reconnect).length > 0) {
     const policy = {}
-    for (const [k, v] of Object.entries(reconnect)) {
-      if (typeof v === 'number' && !Number.isFinite(v)) {
-        errors.push(`重连策略的 ${k} 必须是数字`)
+    for (const key of ['initialDelayMs', 'maxDelayMs']) {
+      const v = reconnect[key]
+      if (v === undefined) continue
+      if (!Number.isFinite(v) || v < 1 || v > MAX_TIMER_DELAY_MS) {
+        errors.push(`重连策略的 ${key} 必须是 1–${MAX_TIMER_DELAY_MS} 之间的数字（毫秒）`)
       } else {
-        policy[k] = v
+        policy[key] = v
       }
     }
+    if (reconnect.maxAttempts !== undefined) {
+      const v = reconnect.maxAttempts
+      if (!Number.isInteger(v) || v < 1) {
+        errors.push('重连策略的 maxAttempts 必须是不小于 1 的整数')
+      } else {
+        policy.maxAttempts = v
+      }
+    }
+    if (reconnect.enabled !== undefined) policy.enabled = reconnect.enabled
     if (Object.keys(policy).length > 0) config.reconnect = policy
   }
 
