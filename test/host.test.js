@@ -212,7 +212,10 @@ test('POST remove：删除条目并生成备份', async () => {
   try {
     const res = await invoke(env.routes, '/mcp-manager/remove', 'POST', { id: 'mcp-comfy' })
     assert.equal(res.status, 200, JSON.stringify(res.json))
-    assert.equal(res.json.restartRequired, true)
+    // 没有 pluginManager 时无法确认是否已卸载 —— 不能宣称"已从运行中卸载"
+    assert.equal(res.json.live, false)
+    assert.equal(res.json.restartRequired, false)
+    assert.match(res.json.note, /如果已经建立/)
     const text = env.read()
     assert.equal(/- id: mcp-comfy/.test(text), false)
     assert.equal(/- insert:/.test(text), false)
@@ -220,6 +223,32 @@ test('POST remove：删除条目并生成备份', async () => {
     const backups = fs.readdirSync(env.dir).filter((n) => n.includes('.bak-mcp-manager-'))
     assert.equal(backups.length >= 1, true, '应当生成备份文件')
     assert.equal(fs.readFileSync(path.join(env.dir, backups[0]), 'utf8'), SAMPLE)
+  } finally {
+    env.cleanup()
+  }
+})
+
+test('POST remove：条目原本在运行中 → 确认卸载后如实报告', async () => {
+  let env = null
+  const services = {
+    pluginManager: {
+      // 模拟真实语义：条目还在文件里就还在运行树里，删掉就消失
+      async listPlugins() {
+        const stillThere = env !== null && /- id: mcp-comfy/.test(env.read())
+        return stillThere
+          ? [{ entryId: 'mcp-comfy', patchId: 'mcp-comfy', moduleName: '@deepseek-ai/dsh-mcp-client', enabled: true, fiberPhase: 'active' }]
+          : []
+      },
+      async setPluginEnabled() { return { application: 'applied' } },
+    },
+  }
+  env = setup(services)
+  try {
+    const res = await invoke(env.routes, '/mcp-manager/remove', 'POST', { id: 'mcp-comfy' })
+    assert.equal(res.status, 200, JSON.stringify(res.json))
+    assert.equal(res.json.live, true)
+    assert.equal(res.json.restartRequired, false)
+    assert.match(res.json.note, /已从运行中的 DSH 卸载/)
   } finally {
     env.cleanup()
   }

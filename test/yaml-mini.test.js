@@ -84,6 +84,16 @@ test('parseYamlSubset：块序列与流式数组', () => {
   assert.deepEqual(parsed.emptyMap, {})
 })
 
+test('parseYamlSubset：顶层 flow 集合（新 profile 的默认 patch 文件）', () => {
+  // 新建 profile 的 cordis.patch.yml 就是「注释 + []」
+  assert.deepEqual(y.parseYamlSubset('# Your patch layer\n# ...\n[]\n'), [])
+  assert.deepEqual(y.parseYamlSubset('[]'), [])
+  assert.deepEqual(y.parseYamlSubset('{}'), {})
+  assert.deepEqual(y.parseYamlSubset('["a", {"b": 1}]'), ['a', { b: 1 }])
+  // flow 集合后面还有内容 → 拒绝，而不是忽略
+  assert.throws(() => y.parseYamlSubset('[]\n- id: x\n'), /无法归入任何块/)
+})
+
 test('parseYamlSubset：拒绝不支持的 YAML 特性而不是猜', () => {
   assert.throws(() => y.parseYamlSubset('a: |\n  text\n'), /块标量/)
   assert.throws(() => y.parseYamlSubset('a: !!js/function >\n  x\n'), /块标量/)

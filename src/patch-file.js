@@ -167,6 +167,22 @@ function genEntryLines(entry, itemIndent) {
   return out
 }
 
+/** 顶层 `[]`（空 flow 数组）的行号 —— 新建 profile 的 cordis.patch.yml 默认就是这一行。 */
+function findEmptyFlowArrayLine(lines) {
+  for (let i = 0; i < lines.length; i++) {
+    const raw = stripComment(lines[i]).trimEnd()
+    if (raw === '') continue
+    if (indentOf(raw) !== 0) continue
+    if (/^\[\s*\]$/.test(raw.trim())) return i
+  }
+  return -1
+}
+
+/** 文件里是否还有顶层条目（`- xxx` 开头的行）。 */
+function hasTopLevelItem(lines) {
+  return lines.some((line) => isTopItem(line))
+}
+
 /**
  * 新增或整体替换一个 insert 条目（按 id 匹配）。
  * @returns {{ text: string, action: 'updated'|'appended'|'created-insert' }}
@@ -186,8 +202,16 @@ function upsertEntry(text, entry) {
     lines.splice(target.insertEnd, 0, ...gen)
     return { text: lines.join(scanned.lineEnding), action: 'appended' }
   }
-  // 文件里还没有任何 insert 块：在末尾新建一个
+  // 文件里还没有任何 insert 块。
+  // 注意：新建 profile 的 patch 文件内容是 `[]`（flow 空数组），
+  // 直接往后追加 `- insert:` 会变成「一个文档里既有 flow 序列又有 block 序列」的非法 YAML，
+  // 所以这一行必须原地展开，而不是追加。
   const gen = genEntryLines(entry, 4)
+  const emptyArrayLine = findEmptyFlowArrayLine(lines)
+  if (emptyArrayLine >= 0) {
+    lines.splice(emptyArrayLine, 1, '- insert:', ...gen)
+    return { text: lines.join(scanned.lineEnding), action: 'created-insert' }
+  }
   while (lines.length > 0 && lines[lines.length - 1].trim() === '') lines.pop()
   lines.push('', '- insert:', ...gen, '')
   return { text: lines.join(scanned.lineEnding), action: 'created-insert' }
@@ -214,6 +238,12 @@ function removeEntry(text, id) {
       let end = block.blockEnd
       lines.splice(block.blockStart, end - block.blockStart)
     }
+  }
+  if (!hasTopLevelItem(lines) && findEmptyFlowArrayLine(lines) < 0) {
+    // 文件里已经没有任何条目了：补一个合法的空数组字面量，
+    // 让 patch 文件始终是「顶层数组」而不是空文档。
+    while (lines.length > 0 && lines[lines.length - 1].trim() === '') lines.pop()
+    lines.push('[]', '')
   }
   return { text: lines.join(scanned.lineEnding), removed: true }
 }

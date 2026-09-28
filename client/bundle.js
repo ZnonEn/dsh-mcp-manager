@@ -380,6 +380,11 @@ window.__ModuleLoader__.load({
 
       React.useEffect(function () { load(false) }, [])
 
+      // DSH 的热加载有几秒延迟，保存后再刷一次，让状态徽章回到最终值
+      function loadLater() {
+        setTimeout(function () { load(true) }, 4000)
+      }
+
       function save() {
         if (!draft) return
         setBusy(true)
@@ -387,7 +392,8 @@ window.__ModuleLoader__.load({
         api("/save", { server: draftToPayload(draft), originalId: draft.originalId })
           .then(function (res) {
             setDraft(null)
-            setNotice(res.note || "已保存，重启 DSH 后生效。")
+            setNotice(res.note || "已保存。")
+            loadLater()
             return load(true)
           })
           .catch(function (e) {
@@ -402,7 +408,8 @@ window.__ModuleLoader__.load({
         api("/remove", { id: id })
           .then(function (res) {
             setConfirmId(null)
-            setNotice(res.note || "已删除，重启 DSH 后生效。")
+            setNotice(res.note || "已删除。")
+            loadLater()
             return load(true)
           })
           .catch(function (e) { setError(e.message) })
@@ -415,6 +422,7 @@ window.__ModuleLoader__.load({
         api("/toggle", { id: server.id, enabled: enable })
           .then(function (res) {
             setNotice(res.note || null)
+            loadLater()
             return load(true)
           })
           .catch(function (e) { setError(e.message) })
@@ -512,7 +520,7 @@ window.__ModuleLoader__.load({
         React.createElement("div", { className: "mm-desc" },
           "说明：新增、编辑、删除会直接改写 profile 的 cordis.patch.yml（改动前自动备份，最多保留 10 份 .bak-mcp-manager-*）。",
           React.createElement("br"),
-          "DSH 的 Loader 不会热重载 profile patch，因此这三类改动需要重启 DSH 才生效；「停用/启用」在运行中的条目上会走 pluginManager 立即生效。"
+          "DSH 通常会监视该文件并自动热加载 —— 保存后这里会如实显示是否已经生效；若显示「待重启生效」，重启 DSH 即可。「停用/启用」对运行中的条目走 pluginManager，立即生效。"
         )
       )
     }

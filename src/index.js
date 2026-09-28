@@ -255,6 +255,35 @@ module.exports = {
       return run
     }
 
+    async function liveServersNow() {
+      const manager = ctx.get('pluginManager')
+      if (!manager || typeof manager.listPlugins !== 'function') return null
+      try {
+        return pickLiveServers(await manager.listPlugins(), moduleName)
+      } catch {
+        return null
+      }
+    }
+
+    /**
+     * 写盘后短暂轮询，确认 DSH 是否真的把这次改动热加载进来了。
+     * 实测：DSH 会监视 cordis.patch.yml 并热应用，但**不是瞬间的** ——
+     * 写入后大约 2–6 秒条目才进入运行树（14x 次实测中 1.5s 常常还没生效）。
+     * 所以这里给 3 秒窗口：等到了就说"已生效"，没等到就保守地说"可能需要重启"，
+     * 而不是把一次探测的结果当成定论。
+     * 没有 pluginManager 时返回 false（无法确认 → 按最保守的说法提示）。
+     */
+    async function confirmLive(entryId, expectPresent, timeoutMs = 3000) {
+      const deadline = Date.now() + timeoutMs
+      for (;;) {
+        const live = await liveServersNow()
+        if (live === null) return false
+        if ((matchLive(live, entryId) !== null) === expectPresent) return true
+        if (Date.now() >= deadline) return false
+        await new Promise((resolve) => setTimeout(resolve, 200))
+      }
+    }
+
     // ── 状态组装 ──────────────────────────────────────────────────────────
     async function buildState() {
       const profile = resolveProfile(false)
@@ -378,13 +407,18 @@ module.exports = {
       }
       const upserted = patchFile.upsertEntry(working, { id, moduleName, config: serverConfig })
       const written = writePatchText(upserted.text, id)
+      const hot = await confirmLive(id, true)
       return {
         ok: true,
         action: upserted.action,
         id,
         file: written.file,
-        restartRequired: true,
-        note: '配置已写入 profile 文件；DSH 的 Loader 不会热重载 profile patch，重启 DSH 后该服务器才会连接。',
+        restartRequired: !hot,
+        live: hot,
+        // 探测窗口只有几秒，热加载本身可能更慢，所以措辞不把探测结果当定论
+        note: hot
+          ? '配置已写入 profile 文件，并且 DSH 已热加载该条目（已生效）。'
+          : '配置已写入 profile 文件。DSH 通常会在几秒内自动热加载 —— 设置页会自动显示最新状态；若一直显示「待重启生效」，重启 DSH 即可。',
       }
     }
 
@@ -392,6 +426,9 @@ module.exports = {
       const id = body && typeof body.id === 'string' ? body.id : ''
       if (id === '') throw new Error('缺少 id')
       const text = readPatchText()
+      // 先看它删除前是不是真的在运行 —— 否则"已卸载"就是误报（条目可能本来就没加载过）
+      const beforeLive = await liveServersNow()
+      const wasLive = beforeLive !== null && matchLive(beforeLive, id) !== null
       const removed = patchFile.removeEntry(text, id)
       if (!removed.removed) {
         const err = new Error(`找不到条目 ${id}`)
@@ -400,12 +437,16 @@ module.exports = {
       }
       const remaining = patchFile.listMcpEntries(removed.text, moduleName)
       const written = writePatchText(removed.text, remaining.length > 0 ? remaining[0].id : null)
+      const unloaded = wasLive ? await confirmLive(id, false) : false
       return {
         ok: true,
         id,
         file: written.file,
-        restartRequired: true,
-        note: '条目已从 profile 文件删除；已连接的服务会一直运行到 DSH 重启。',
+        restartRequired: wasLive && !unloaded,
+        live: unloaded,
+        note: unloaded
+          ? '条目已从 profile 文件删除，并且已从运行中的 DSH 卸载。'
+          : '条目已从 profile 文件删除；它的连接（如果已经建立）会保留到 DSH 重启。',
       }
     }
 

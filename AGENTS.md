@@ -20,25 +20,31 @@ DSH（DeepSeek Harness）插件：在桌面端设置页里管理 MCP 服务器�
 - **写盘顺序：备份 → 原子写（tmp + rename）→ 回读校验。** 回读拿不到目标条目就抛错，不能当成成功。
 - **不要替用户写默认值。** `args`/`env`/`cwd`/`toolCallTimeoutMs`/`failOnStartupError`/`maxInstructionBytes` 都有官方默认值，用户没填就不写（`maxInstructionBytes` 等于 32768、`failOnStartupError === false` 时也要省略）。
 - **`serverName` 全局唯一**：它决定 `mcp__<serverName>__<tool>`。编辑自己时要通过 `originalServerName` 排除自己，否则改不动自己的名称。
-- **生效语义要如实说**：新增/编辑/删除改的是 profile patch，DSH Loader 不热重载 → 必须返回 `restartRequired: true`；只有 `pluginManager.setPluginEnabled` 那条路径才是 `applied`。不要为了让界面"看起来成功"而谎报。
-- **profile 定位不能只看 `--profile`。** 桌面端把 profile 目录作为位置参数传进来（`dsh-desktop-host ... <profileDir> <runtime...>`），要看 argv 里真实存在的目录，并用 live patch id 做指纹兜底。
+- **生效语义要如实说。** 新增/编辑/删除改的是 profile patch：DSH（实测桌面端与 CLI 都是）通常会自动热加载这个文件，所以写盘后必须用 `confirmLive()` 实测探测，再决定返回 `restartRequired` 还是"已生效" —— 既不要一律谎报"要重启"，也不要假装已经生效。
+- **新建 profile 的 `cordis.patch.yml` 内容就是一个 `[]`**（顶层 flow 空数组）。往里追加 `- insert:` 会产生「同一文档里既有 flow 序列又有 block 序列」的非法 YAML，必须**原地展开那一行**；删掉最后一个条目后要把 `[]` 补回去。`parseYamlSubset` 也要能解析顶层 flow 集合（测试里有对应用例）。
+- **profile 定位不能只看一种来源。** 桌面端把 profile 目录作为位置参数传进来（`dsh-desktop-host ... <profileDir> <runtime...>`）；CLI 用 `--profile <name>`；而进程环境里的 `DSH_PROFILE_DIR` 可能是别的 profile 留下的旧值（实测被它带偏过）。三处都要认，并用 live patch id 指纹兜底。
 - 客户端 bundle **只允许** `require('react')`；测试里有一条断言盯着这一点。
 
 ## Build / verify
 
 ```powershell
 npm run check   # node --check × 6
-npm test        # node --test test/*.test.js（42+ 用例，无需 node_modules）
+npm test        # node --test test/*.test.js（52 个用例，无需 node_modules）
 ```
 
 测试不联网、不写用户的真实 profile：`test/host.test.js` 用 mock ctx + `os.tmpdir()` 里的临时 profile；`test/real-profile.test.js` 对真实 `cordis.patch.yml` **只读**（做一次"编辑后删除"的内存模拟，不落盘）。
 
 ## Running / testing（人工）
 
-装到 profile 后必须**重启 DSH** 才会加载插件条目：
+桌面端 profile 不能用命令行装（`dsh plugin --profile desktop` 会被 Electron 独占保护拒绝），要在**设置 → 插件**里粘贴本目录路径安装，然后重启 DSH。
+
+想验证 host 半边而不碰桌面端，可以起一个临时 profile：
 
 ```powershell
-dsh plugin --profile desktop add "D:\dsh插件\dsh-mcp-manager"
+dsh --profile mcpman-smoke --from-default-profile web --dump-config   # 建临时 profile
+dsh plugin --profile mcpman-smoke add "D:\dsh插件\dsh-mcp-manager"    # 装进去（会自动注册 bundle 层）
+dsh --profile mcpman-smoke --no-open --port 18999                     # 起服务
+curl http://127.0.0.1:18999/mcp-manager/state                         # 直接打插件路由
 ```
 
-重启后：设置 → MCP 服务器。排错先跑 `node tools/inspect-patch.js`，再看 `GET /mcp-manager/state`。
+用完删掉 `%USERPROFILE%\.dsh\profiles\mcpman-smoke` 即可。排错先跑 `node tools/inspect-patch.js`。

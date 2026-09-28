@@ -204,13 +204,25 @@ function parseMapping(lines, start, indent) {
 
 /**
  * 解析本实现支持范围内的 YAML 文本。
- * 根节点可以是映射或序列；文件级注释与空行会被跳过。
+ * 根节点可以是映射、块序列，或**顶层 flow 集合**（新建 profile 的
+ * cordis.patch.yml 默认内容就是一个 `[]`）。文件级注释与空行会被跳过。
  */
 function parseYamlSubset(text) {
   const lines = String(text).replace(/\r\n?/g, '\n').split('\n')
   const i = skipTrivia(lines, 0)
   if (i >= lines.length) return null
-  const indent = indentOf(lines[i])
+  const first = stripComment(lines[i]).trimEnd()
+  const firstTrimmed = first.trim()
+  if (firstTrimmed[0] === '[' || firstTrimmed[0] === '{') {
+    // 顶层 flow 集合：整份文档就是它，后面不允许再有内容
+    const value = parseScalar(firstTrimmed)
+    const leftoverFlow = skipTrivia(lines, i + 1)
+    if (leftoverFlow < lines.length) {
+      throw new Error(`第 ${leftoverFlow + 1} 行无法归入任何块，解析中止：${lines[leftoverFlow].trim().slice(0, 40)}`)
+    }
+    return value
+  }
+  const indent = indentOf(first)
   const { value, next } = parseBlock(lines, i, indent)
   // 残余的非空行说明文件里有本实现读不懂的并列结构 —— 必须报错而不是静默忽略。
   const leftover = skipTrivia(lines, next)

@@ -20,29 +20,42 @@
 
 ## 安装
 
-```powershell
-dsh plugin --profile desktop add "D:\dsh插件\dsh-mcp-manager"
+桌面端的 profile 由桌面应用**独占管理** —— 命令行会直接拒绝：
+
+```
+$ dsh plugin --profile desktop add "..."
+error: profile "desktop" is managed exclusively by the Electron application
 ```
 
-然后**完全退出并重启 DSH 桌面端**（新增的插件条目本身也属于 profile patch，同样要重启才加载）。
+所以用桌面端自己的插件页安装：
 
-> 桌面端用的 profile 是 `desktop`（对应 `%USERPROFILE%\.dsh\profiles\desktop`）。
-> 装完可以打开 `%USERPROFILE%\.dsh\profiles\desktop\cordis.patch.yml` 确认多了一条 `- id: mcp-manager`。
+1. 打开 **设置 → 插件**，在安装入口粘贴本目录的绝对路径：
 
-卸载：
+   ```
+   D:\dsh插件\dsh-mcp-manager
+   ```
 
-```powershell
-dsh plugin --profile desktop remove dsh-mcp-manager
-```
+2. 安装完成后**完全退出并重启 DSH 桌面端**（插件自身的条目要等下一次启动才会加载）。
+
+重启后即可看到：**设置 → MCP 服务器**。
+
+> 其它 profile（非桌面端独占）可以直接用命令行，方便验证：
+>
+> ```powershell
+> dsh plugin --profile <name> add "D:\dsh插件\dsh-mcp-manager"
+> ```
+>
+> 卸载：在插件页卸载，或 `dsh plugin --profile <name> remove dsh-mcp-manager`。
 
 ## 生效规则（重要）
 
 | 操作 | 生效方式 |
 | --- | --- |
-| 新增 / 编辑 / 删除服务器 | 改写 profile 的 `cordis.patch.yml` → **重启 DSH 后生效** |
-| 启用 / 停用（该条目当前已在运行） | 走 `pluginManager.setPluginEnabled` → **立即生效** |
+| 新增 / 编辑 / 删除服务器 | 改写 profile 的 `cordis.patch.yml`。DSH 通常会监视该文件并**自动热加载**；写盘后插件会实测探测，界面如实显示"已生效"或"待重启生效" |
+| 启用 / 停用（该条目已在运行） | 走 `pluginManager.setPluginEnabled`，**立即生效** |
+| 直接改 profile 文件 | 同样会被 DSH 热加载（`--dump-config` 会把它作为 profile 层读入） |
 
-原因是 DSH 的 Loader 不会热重载 profile patch（`cordis.patch.yml` 属于启动期配置），而 MCP 服务器条目正是 profile patch 的一部分。界面会如实提示「待重启生效」，不会假装已经连上。
+"是否已生效"不是猜的：写盘后插件会在 1.5 秒内轮询 `pluginManager.listPlugins()`，确认条目真的进入了运行树才报"已生效"，否则保守提示"待重启生效"。
 
 ## 安全与可靠性
 
@@ -75,15 +88,16 @@ dsh plugin --profile desktop remove dsh-mcp-manager
 
 ### 关于 profile 定位
 
-DSH 桌面端由 `dsh-desktop-host` 启动 harness，命令行里**没有** `--profile`，而是把 profile 目录作为位置参数传进去。本项目按这个事实定位，顺序为：
+DSH 桌面端由 `dsh-desktop-host` 启动 harness，命令行里**没有** `--profile`，而是把 profile 目录作为位置参数传进去；而命令行启动（`dsh --profile web`）又只有 `--profile`，且进程环境里的 `DSH_PROFILE_DIR` 可能是别的 profile 留下的旧值（实测：用 `--profile mcpman-smoke` 起的实例里，该变量仍指向 `desktop`）。所以定位顺序是：
 
 1. 环境变量 `DSH_MCP_MANAGER_PROFILE`（显式覆盖）
-2. `process.argv` 里真实存在的 profile 目录（含 `cordis.patch.yml` / `cordis.yml` 的目录）
-3. 环境变量 `DSH_PROFILE_DIR`
-4. 用 live 的 patch id 与 `$DSH_HOME/profiles/*/cordis.patch.yml` 做指纹匹配
-5. `$DSH_HOME/profiles/desktop` → `web`
+2. `process.argv` 里真实存在的 profile 目录（桌面端的位置参数）
+3. `process.argv` 里的 `--profile <name>` / `--profile=<name>`（命令行启动）
+4. 环境变量 `DSH_PROFILE_DIR`
+5. 用 live 的 patch id 与 `$DSH_HOME/profiles/*/cordis.patch.yml` 做指纹匹配
+6. `$DSH_HOME/profiles/desktop` → `web`
 
-（这正是为了避开"只认 `--profile` 参数、于是回落到错误 profile、读到另一份配置"的坑。）
+（这正是为了避开"只认一种来源、于是回落到错误 profile、读到另一份配置"的坑。）
 
 ## 目录结构
 
@@ -111,7 +125,9 @@ npm run check   # 六个文件的语法检查
 npm test        # node:test，无需联网、不依赖 node_modules
 ```
 
-测试覆盖：最小 YAML 解析/生成、patch 文件的行级编辑（含注释保留、CRLF、幂等）、表单校验、profile 定位、host 全部 HTTP 路由的端到端行为（用 mock ctx + 真实临时文件）、客户端 bundle 的协议与注册参数，以及对本机真实 `cordis.patch.yml` 的只读验证。
+测试覆盖：最小 YAML 解析/生成、patch 文件的行级编辑（含注释保留、CRLF、幂等、空 profile 的 `[]` 展开）、表单校验、profile 定位、host 全部 HTTP 路由的端到端行为（用 mock ctx + 真实临时文件）、客户端 bundle 的协议与注册参数，以及对本机真实 `cordis.patch.yml` 的只读验证。
+
+除此之外还做过一次**真实 DSH 实例的端到端验证**（临时 profile，验证后已清理）：装进临时 profile → `--dump-config` 确认条目进入 host 组合 → 启动 `dsh --profile … --port 18999` → `GET /mcp-manager/state` 正确读出真实条目 → `POST /save` 新增 → 文件被正确改写且 `--dump-config` 仍能解析 → `POST /toggle` 走 pluginManager 立即生效 → 重复 serverName 被拒 → `POST /remove` 后文件回到合法的空数组。
 
 ## 许可
 

@@ -4,6 +4,7 @@ const test = require('node:test')
 const assert = require('node:assert/strict')
 
 const pf = require('../src/patch-file.js')
+const y = require('../src/yaml-mini.js')
 
 const SAMPLE = [
   '# Your patch layer for this dsh profile',
@@ -162,4 +163,47 @@ test('hasEntryId：跨模块查重（避免 id 冲突）', () => {
   assert.equal(pf.hasEntryId(SAMPLE, 'mcp-comfy'), true)
   assert.equal(pf.hasEntryId(SAMPLE, 'mcp-other'), false)
   assert.equal(pf.hasEntryId(SAMPLE, 'ui-theme'), true) // 顶层条目也算占用
+})
+
+test('空 profile 文件（顶层 []）：原地展开，不产生非法 YAML', () => {
+  // 新建 profile 的 cordis.patch.yml 长这样：注释 + 一个空的 flow 数组
+  const bare = [
+    '# Your patch layer for this dsh profile, applied after every bundle layer:',
+    '# a top-level YAML array of loader patch entries',
+    '[]',
+    '',
+  ].join('\n')
+  const added = pf.upsertEntry(bare, {
+    id: 'mcp-first',
+    moduleName: '@deepseek-ai/dsh-mcp-client',
+    config: { serverName: 'first', transport: 'stdio', command: 'node' },
+  })
+  assert.equal(added.action, 'created-insert')
+  assert.equal(/\[\]/.test(added.text), false, '不能留下孤立的 []')
+  // 生成的文件必须仍是合法的 YAML 数组
+  const parsed = y.parseYamlSubset(added.text)
+  assert.equal(Array.isArray(parsed), true)
+  assert.equal(parsed.length, 1)
+  assert.equal(parsed[0].insert[0].id, 'mcp-first')
+  assert.equal(pf.listMcpEntries(added.text).length, 1)
+  assert.match(added.text, /# Your patch layer for this dsh profile/)
+
+  // 再把这唯一的条目删掉：文件应回到「合法的空数组」而不是空文档
+  const back = pf.removeEntry(added.text, 'mcp-first')
+  assert.equal(back.removed, true)
+  assert.equal(pf.listMcpEntries(back.text).length, 0)
+  assert.equal(y.parseYamlSubset(back.text).length, 0)
+  assert.match(back.text, /^\[\]$/m)
+})
+
+test('空 flow 数组（[ ] 带空格）同样被识别', () => {
+  const bare = '# c\n[ ]\n'
+  const added = pf.upsertEntry(bare, {
+    id: 'mcp-x',
+    moduleName: '@deepseek-ai/dsh-mcp-client',
+    config: { serverName: 'x', transport: 'stdio', command: 'node' },
+  })
+  assert.equal(added.action, 'created-insert')
+  assert.equal(/\[\s*\]/.test(added.text), false)
+  assert.equal(pf.listMcpEntries(added.text).length, 1)
 })

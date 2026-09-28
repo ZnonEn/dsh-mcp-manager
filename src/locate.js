@@ -50,6 +50,22 @@ function isProfileDir(dir, io) {
   return PROFILE_MARKERS.some((m) => io.exists(path.join(dir, m)))
 }
 
+/**
+ * 从 argv 里取 `--profile <name>` / `--profile=<name>`。
+ * 桌面端不用它（走位置参数），但 CLI 启动（`dsh --profile web`）只有它 ——
+ * 而进程环境里的 DSH_PROFILE_DIR 可能是别的 profile 留下的旧值，不能无条件相信。
+ */
+function profileNameFromArgv(argv) {
+  for (let i = 0; i < argv.length; i++) {
+    const arg = argv[i]
+    if (typeof arg !== 'string') continue
+    if (arg === '--profile' && typeof argv[i + 1] === 'string' && argv[i + 1] !== '') return argv[i + 1]
+    const m = /^--profile=(.+)$/.exec(arg)
+    if (m && m[1] !== '') return m[1]
+  }
+  return null
+}
+
 /** 取 patch 文件里顶层条目的 `- id:` 值集合（指纹用）。 */
 function topLevelPatchIds(text) {
   const ids = new Set()
@@ -107,6 +123,17 @@ function locateProfileDir(options = {}) {
   }
   const argvHit = candidates.find((c) => c.reason.includes(PATCH_FILE))
   if (argvHit) return { dir: argvHit.dir, source: 'argv', candidates, warnings }
+
+  // 2b) CLI 场景：`dsh --profile <name>` —— 用名字定位，避免被环境变量里的旧值带偏
+  const profileName = profileNameFromArgv(argv)
+  if (profileName) {
+    const namedDir = path.join(home, 'profiles', profileName)
+    if (isProfileDir(namedDir, io)) {
+      candidates.push({ dir: namedDir, reason: `argv 的 --profile ${profileName}` })
+      return { dir: namedDir, source: 'argv:--profile', candidates, warnings }
+    }
+    warnings.push(`argv 指定了 --profile ${profileName}，但 ${namedDir} 不是一个 profile 目录`)
+  }
 
   // 3) 环境变量显式指定
   const envDir = String(env.DSH_PROFILE_DIR || '').trim()

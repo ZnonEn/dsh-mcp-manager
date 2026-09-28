@@ -43,6 +43,37 @@ test('桌面端场景：profile 目录来自 argv 位置参数（不是 --profil
   assert.equal(res.source, 'argv')
 })
 
+test('CLI 场景：argv 的 --profile 优先于环境变量里的旧 profile 目录', () => {
+  const home = 'C:\\Users\\u\\.dsh'
+  const smoke = `${home}\\profiles\\smoke`
+  const desktop = `${home}\\profiles\\desktop`
+  const io = makeIo({
+    [`${smoke}\\cordis.patch.yml`]: '[]\n',
+    [`${desktop}\\cordis.patch.yml`]: '- id: a\n',
+  })
+  const res = locateProfileDir({
+    argv: ['C:\\node.exe', 'C:\\app\\dsh\\lib\\cli.js', '--profile', 'smoke', '--no-open', '--port', '18999'],
+    env: { DSH_HOME: home, DSH_PROFILE_DIR: desktop },
+    io,
+  })
+  assert.equal(res.dir, smoke)
+  assert.equal(res.source, 'argv:--profile')
+
+  const eq = locateProfileDir({ argv: ['--profile=smoke'], env: { DSH_HOME: home }, io })
+  assert.equal(eq.dir, smoke)
+  assert.equal(eq.source, 'argv:--profile')
+
+  // 未知名字：不硬猜，继续往下回退并留下警告
+  const unknown = locateProfileDir({
+    argv: ['--profile', 'nope'],
+    env: { DSH_HOME: home, DSH_PROFILE_DIR: desktop },
+    io,
+  })
+  assert.equal(unknown.dir, desktop)
+  assert.equal(unknown.source, 'env:DSH_PROFILE_DIR')
+  assert.match(unknown.warnings.join('|'), /nope/)
+})
+
 test('环境变量 DSH_MCP_MANAGER_PROFILE 优先于一切', () => {
   const forced = 'D:\\forced-profile'
   const io = makeIo({ [`${forced}\\cordis.patch.yml`]: '- id: forced\n' })
