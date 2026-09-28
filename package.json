@@ -29,6 +29,7 @@
   "files": [
     "src",
     "client",
+    "tools",
     "cordis.patch.yml",
     "README.md",
     "AGENTS.md",
