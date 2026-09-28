@@ -218,7 +218,7 @@ npm test        # node:test，64 个用例，无需联网、不依赖 node_modul
 
 ### 兼容性
 
-配置字段按已安装的 `@deepseek-ai/dsh-mcp-client`（0.1.7-rc.2）的 schema 对齐。DSH 升级后若字段有变化，欢迎提 Pull Request（本仓库未开启 Issues）。
+配置字段按已安装的 `@deepseek-ai/dsh-mcp-client`（0.1.7-rc.2）的 schema 对齐。DSH 升级后若字段有变化，欢迎开 issue。
 
 ## 许可
 
