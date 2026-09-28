@@ -1,0 +1,44 @@
+{
+  "name": "dsh-mcp-manager",
+  "version": "0.1.0",
+  "description": "DeepSeek Harness plugin: manage the desktop app's MCP servers from a Settings page (add / edit / remove / enable / disable, with live connection status).",
+  "license": "MIT",
+  "keywords": [
+    "dsh",
+    "deepseek-harness",
+    "cordis",
+    "plugin",
+    "mcp",
+    "model-context-protocol",
+    "settings"
+  ],
+  "main": "src/index.js",
+  "exports": {
+    ".": "./src/index.js",
+    "./client": "./client/bundle.js",
+    "./package.json": "./package.json"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web"
+    }
+  },
+  "files": [
+    "src",
+    "client",
+    "cordis.patch.yml",
+    "README.md",
+    "AGENTS.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "check": "node --check src/index.js && node --check src/patch-file.js && node --check src/yaml-mini.js && node --check src/validate.js && node --check src/locate.js && node --check client/bundle.js",
+    "test": "node --test test/*.test.js"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

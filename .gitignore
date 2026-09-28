@@ -1,0 +1,10 @@
+node_modules/
+npm-debug.log*
+pnpm-debug.log*
+*.log
+.DS_Store
+Thumbs.db
+
+# 插件写 profile 时产生的临时/备份文件（正常不应出现在本仓库里）
+*.tmp-mcp-manager
+*.bak-mcp-manager-*

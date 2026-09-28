@@ -1,0 +1,12 @@
+# dsh-mcp-manager 的 bundle patch：当这个包被 `dsh plugin add` 安装到某个
+# profile 时，把插件条目插入该 profile 的 host 组合。
+#
+# 插件是 HOST-PLANE：
+#   · host 半边用 webServer 注册 /mcp-manager/* 路由，并读写 profile 的
+#     cordis.patch.yml（新增/编辑/删除/启停 MCP 服务器条目）；
+#   · client 半边在设置页注册一页「MCP 服务器」。
+# 因此必须留在 host 组合里，不能放进 agent preset。
+
+- insert:
+    - id: mcp-manager
+      name: 'dsh-mcp-manager'
