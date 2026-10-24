@@ -29,6 +29,7 @@ MCP 服务器唯一的声明位置是 profile 目录里的 `cordis.patch.yml`。
 - **删除**：二次确认；删掉最后一个条目时，`- insert:` 块会被一并清理，或把新建 profile 的 `[]` 还原回去。
 - **启用/停用**：条目已在运行树里时走官方 `pluginManager.setPluginEnabled`，**立即生效**；停用状态写进 profile patch 的顶层覆盖项（`- id: <条目id>` + `disabled: true`），重启后依然有效。
 - **查看配置文件**：设置页内直接看 `cordis.patch.yml` 原文（只读）。
+- **会话模式**：把若干 MCP 打包成一个 agent preset，只在选定该模式的会话里生效，其它会话完全不加载（见下）。
 - **零依赖**：host 半边只用 Node 内置模块 + 自带的最小 YAML 读写实现，浏览器半边只有一个手写 bundle（只 `require('react')`）。
 
 ## 安装
@@ -92,6 +93,24 @@ dsh plugin remove dsh-mcp-manager
 | 新增 / 编辑 / 删除 | 改写 profile 的 `cordis.patch.yml`。DSH 会监视该文件并**自动热加载**（实测约 2–6 秒）；写盘后插件会实测探测，界面如实显示「已生效」还是「待重启生效」 |
 | 启用 / 停用（已在运行树） | 走 `pluginManager.setPluginEnabled`，**立即生效** |
 | 你自己在外部改这个文件 | 同样会被 DSH 热加载；插件在下次读文件时（打开页面 / 点刷新）就能看到 |
+
+## 会话模式：让 MCP 只在指定会话里生效
+
+不想让某个 MCP 在所有对话里都加载？把它打包成一个**会话模式**：
+
+1. 设置页 →「会话模式」→ 新建模式，勾选要打包的服务器（可多选），填模式名，选基础组合（standard / ptc / minimal）。
+2. 创建后，这些服务器会**自动从全局停用**（只写顶层 `disabled` 覆盖项，不删你的配置），只在这个模式里生效。
+3. 新建会话时，在模式列表里选它 —— 只有该会话加载这些 MCP；选别的模式（或不选）则完全不加载。
+
+删除模式时，对应服务器会自动恢复全局启用（若没有别的模式在用它）。
+
+**机制**：模式就是 DSH 原生的 agent preset。插件在 profile 的 `cordis.patch.yml` 里插入一条
+`@deepseek-ai/dsh-agent-preset` 声明，`plugins` = 基础组合的完整插件列表（22 项，**从官方
+`dsh-web-app/presets/<base>.patch.yml` 原样复制**，`!!js` 与 group/isolate 结构逐字节保留）+ 你的 MCP 条目。
+`dsh-mcp-client` 用 `scopeOf(ctx)` 预留 `serverName`，所以这些服务器的连接与工具天然只属于选中该模式的会话。
+
+**已知限制**：模式只能在**还没发过消息的新会话**里选择（DSH 的 `select` 会检查 `lastTurn === 0`）；
+聊到一半想换工具集，需要新开会话。创建模式后若「模式列表」里没立刻出现，重启一次 DSH。
 
 ## 支持的配置字段
 

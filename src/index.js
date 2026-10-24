@@ -27,6 +27,8 @@ const fs = require('node:fs')
 const path = require('node:path')
 
 const patchFile = require('./patch-file.js')
+const presetFile = require('./preset-file.js')
+const presetSpec = require('./preset-spec.js')
 const { validateServer } = require('./validate.js')
 const { locateProfileDir } = require('./locate.js')
 
@@ -233,7 +235,14 @@ module.exports = {
       }
     }
 
-    function writePatchText(nextText, expectEntryId) {
+    /**
+     * 写盘 + 回读校验 + 失败回滚。
+     * @param {string} nextText 新文件内容
+     * @param {{ entryId?: string|null, presetRowId?: string|null }} expect
+     *   entryId：期望存在的 mcp-client 条目（insert 条目路径）
+     *   presetRowId：期望存在的 preset 行（会话模式路径）
+     */
+    function writePatchText(nextText, expectEntryId, expectPresetRowId) {
       const profile = resolveProfile(false)
       const file = profile.file
       const previous = fs.readFileSync(file, 'utf8')
@@ -246,6 +255,12 @@ module.exports = {
         // 结构自检：DSH 对无法解析的 profile patch 是**启动期硬失败**
         // （"must fail loud at boot, never be silently skipped"），
         // 所以"条目能读出来"远远不够 —— 必须确认它落在结构正确的独立 insert 块里。
+        if (expectPresetRowId) {
+          const safe = patchFile.assertSafePatch(verifyText, null)
+          if (!safe.ok) throw new Error(`写入后结构自检失败：${safe.problem}`)
+          presetFile.assertSafePresetPatch(verifyText, expectPresetRowId)
+          return { file, entries: patchFile.listMcpEntries(verifyText, moduleName) }
+        }
         const safe = patchFile.assertSafePatch(verifyText, expectEntryId)
         if (!safe.ok) throw new Error(`写入后结构自检失败：${safe.problem}`)
         const entries = patchFile.listMcpEntries(verifyText, moduleName)
@@ -396,6 +411,8 @@ module.exports = {
         error: fileError,
         now: Date.now(),
         routePrefix: ROUTE_PREFIX,
+        combos: text !== null ? listCombos() : [],
+        comboBases: presetSpec.BASE_PRESETS,
         profile: {
           dir: profile.dir,
           source: profile.source,
@@ -579,6 +596,271 @@ module.exports = {
       }
     }
 
+    // ── 会话模式（agent preset 组合）─────────────────────────────────────────
+    //
+    // 目标：让选定的 MCP 服务器只在「选中某个模式的会话」里生效，其它会话保持关闭。
+    //
+    // 机制（DSH 原生）：一个 agent preset 就是一套完整插件组合，会话创建时选定。
+    // 把 `@deepseek-ai/dsh-mcp-client` 行放进某个 preset 的 plugins 里，
+    // 该 MCP 的连接与工具就只属于选中该 preset 的会话（mcp-client 用 scopeOf(ctx)
+    // 预留 serverName，天然按 Agent 作用域隔离）。
+    //
+    // 落盘位置：profile 的 `cordis.patch.yml` 顶层插入一条
+    // `@deepseek-ai/dsh-agent-preset` 行。这是官方文档说明的唯一正规途径，
+    // 而且重启后依然存在（运行时 register() 只活到进程结束）。
+
+    const COMBO_ROW_PREFIX = 'mcp-manager-preset-'
+    const COMBO_ORDER_BASE = 50
+
+    /** 组合在 patch 行里的 id（由 presetId 决定，保证一一对应）。 */
+    function comboRowId(presetId) {
+      return COMBO_ROW_PREFIX + presetId
+    }
+
+    /** 从 presetId 反推（用于识别哪些行是本插件生成的）。 */
+    function isComboRow(rowId) {
+      return typeof rowId === 'string' && rowId.startsWith(COMBO_ROW_PREFIX)
+    }
+
+    /**
+     * 取「基础模式的插件行块」。优先级：
+     *  1) profile patch 里已有 mcp-manager 生成行的 plugins 块（保持用户/历史一致）；
+     *  2) bundle 的 `<base>.patch.yml`（新生成时的来源）。
+     * @returns {{ lines: string[], itemIndent: number, source: string }}
+     */
+    function basePluginBlock(baseId) {
+      // 1) 优先从 bundle 的 preset 定义文件切（权威、且含 profile 未覆盖的默认行）
+      for (const entry of presetSpec.findBundlePresetFiles()) {
+        if (entry.base !== baseId) continue
+        try {
+          const text = fs.readFileSync(entry.file, 'utf8')
+          const block = presetSpec.extractPluginsBlock(text, `preset-${entry.base}`)
+          if (block && block.lines.length > 0) {
+            return { lines: block.lines, itemIndent: block.itemIndent, source: `bundle:${entry.base}` }
+          }
+        } catch (e) {
+          log('warn', `[mcp-manager] 读取 ${entry.file} 失败：${messageOf(e)}`)
+        }
+      }
+      // 2) 退而求其次：从 profile patch 里已生成的组合行复制
+      try {
+        const text = readPatchText()
+        const rows = presetFile.listPresetRows(text)
+        const row = rows.find((r) => r.rowId.startsWith(COMBO_ROW_PREFIX) && r.pluginCount > 0)
+        if (row) {
+          const scanned = presetFile.scanPresetRows(text)
+          const target = scanned.rows.find((r) => r.id === row.rowId)
+          if (target) {
+            const body = scanned.lines.slice(target.start, target.end)
+            const pluginsIdx = body.findIndex((l) => /^\s{4}plugins:\s*$/.test(l))
+            if (pluginsIdx >= 0) {
+              const block = body.slice(pluginsIdx + 1)
+              while (block.length > 0 && block[block.length - 1].trim() === '') block.pop()
+              // 去掉末尾的 mcp-client 行（它们不是基础模式的一部分）
+              return { lines: block, itemIndent: 6, source: `profile:${row.rowId}` }
+            }
+          }
+        }
+      } catch (e) {
+        log('warn', `[mcp-manager] 从 profile 复制基础模式失败：${messageOf(e)}`)
+      }
+      throw new Error(`找不到基础模式「${baseId}」的插件定义，无法生成会话模式`)
+    }
+
+    /** 读当前所有组合（本插件生成的 preset 行）。 */
+    function listCombos() {
+      const profile = resolveProfile(false)
+      if (!profile.exists) return []
+      const text = readPatchText()
+      return presetFile.listPresetRows(text)
+        .filter((row) => isComboRow(row.rowId))
+        .map((row) => {
+          const scanned = presetFile.scanPresetRows(text)
+          const target = scanned.rows.find((r) => r.id === row.rowId)
+          const mcpIds = []
+          if (target) {
+            const body = scanned.lines.slice(target.start, target.end)
+            for (let i = 0; i < body.length; i++) {
+              if (!/\bname:\s*['"]?@deepseek-ai\/dsh-mcp-client['"]?\s*$/.test(body[i])) continue
+              // 往上看最近的 `- id:` 行
+              for (let j = i - 1; j >= 0; j--) {
+                const m = /^\s*-\s+id:\s*['"]?([^'"\n]+?)['"]?\s*$/.exec(body[j])
+                if (m) { mcpIds.push(m[1].trim()); break }
+                if (/^\s*-\s+id:/.test(body[j])) break
+              }
+            }
+          }
+          return {
+            presetId: row.presetId,
+            rowId: row.rowId,
+            name: row.name,
+            description: row.description,
+            servers: mcpIds,
+            pluginCount: row.pluginCount,
+          }
+        })
+    }
+
+    /**
+     * 生成/更新一个组合：基础模式插件行 + 选中的 MCP 服务器行。
+     * @param {{ presetId: string, name?: string, description?: string, base: string, serverIds: string[] }} input
+     */
+    async function saveCombo(input) {
+      const presetId = typeof input.presetId === 'string' ? input.presetId.trim() : ''
+      if (!/^[A-Za-z0-9_-]{1,32}$/.test(presetId)) {
+        const err = new Error('模式标识只能包含字母、数字、下划线、短横线，长度 1–32')
+        err.statusCode = 400
+        throw err
+      }
+      const base = typeof input.base === 'string' && input.base !== '' ? input.base : 'standard'
+      const serverIds = Array.isArray(input.serverIds) ? input.serverIds.filter((s) => typeof s === 'string') : []
+      if (serverIds.length === 0) {
+        const err = new Error('请至少选择一个服务器')
+        err.statusCode = 400
+        throw err
+      }
+
+      const text = readPatchText()
+      const servers = patchFile.listMcpEntries(text, moduleName)
+      const picked = []
+      for (const id of serverIds) {
+        const hit = servers.find((s) => s.id === id)
+        if (!hit) {
+          const err = new Error(`找不到服务器条目 ${id}`)
+          err.statusCode = 400
+          throw err
+        }
+        if (!hit.config) {
+          const err = new Error(`服务器条目 ${id} 的配置无法解析，无法复制到会话模式`)
+          err.statusCode = 400
+          throw err
+        }
+        picked.push(hit)
+      }
+
+      const underlying = basePluginBlock(base)
+      // 基础块与 MCP 行统一由 composePluginsLines 重排到目标缩进（10 列），
+      // 避免两边各自加缩进造成错位（历史 bug：MCP 行多缩进 4 列 → DSH 解析失败）。
+      const targetIndent = 10
+      const pluginLines = presetFile.composePluginsLines(
+        underlying.lines,
+        underlying.itemIndent,
+        picked.map((server) => ({ id: server.id, config: server.config })),
+        targetIndent,
+      )
+
+      const spec = {
+        rowId: comboRowId(presetId),
+        presetId,
+        name: typeof input.name === 'string' && input.name !== '' ? input.name : presetId,
+        description: typeof input.description === 'string' && input.description !== ''
+          ? input.description
+          : `由 mcp-manager 生成：${base} 模式 + ${picked.map((s) => (s.config && s.config.serverName) || s.id).join('、')}`,
+        order: COMBO_ORDER_BASE,
+        pluginLines,
+        // pluginLines 已被 composePluginsLines 重排到目标缩进，这里与之保持一致
+        sourceItemIndent: targetIndent,
+      }
+
+      const result = presetFile.upsertPresetRow(text, spec)
+      // 关键：把加入组合的服务器在**全局层停用**，否则它会同时以全局条目加载，
+      // 就变成了「所有会话都有」——正好是用户不要的效果。
+      // 停用用顶层覆盖项（`- id: X` + `disabled: true`），不删用户的配置。
+      let nextText = result.text
+      const disabledIds = []
+      for (const server of picked) {
+        const toggled = patchFile.setEntryDisabled(nextText, server.id, true)
+        if (toggled.changed) {
+          nextText = toggled.text
+          disabledIds.push(server.id)
+        }
+      }
+      const written = writePatchText(nextText, null, spec.rowId)
+      const applied = await reloadHost()
+      return {
+        ok: true,
+        action: result.action,
+        presetId,
+        rowId: spec.rowId,
+        file: written.file,
+        servers: picked.map((s) => ({ id: s.id, serverName: (s.config && s.config.serverName) || s.id })),
+        disabledGlobally: disabledIds,
+        applied,
+        note: applied === 'applied'
+          ? '会话模式已写入 profile 并已重新加载 —— 新建会话时选择该模式即可。这些服务器已从全局停用，只在该模式的会话里生效。'
+          : '会话模式已写入 profile。要让它在模式列表里出现，需要重启 DSH（重新加载没有在超时内返回）。',
+      }
+    }
+
+    /** 删除一个组合。 */
+    async function removeCombo(input) {
+      const presetId = typeof input.presetId === 'string' ? input.presetId.trim() : ''
+      if (presetId === '') {
+        const err = new Error('缺少 presetId')
+        err.statusCode = 400
+        throw err
+      }
+      const text = readPatchText()
+      const rowId = comboRowId(presetId)
+      // 先记下这个组合用了哪些服务器，删除后把它们在全局层恢复启用，
+      // 否则这些 MCP 既不在任何模式里、全局又是停用的 —— 变成谁都加载不了。
+      const before = listCombos().find((c) => c.presetId === presetId)
+      const usedIds = before ? before.servers : []
+      // 还有别的组合在用同一个服务器时不能恢复启用
+      const stillUsed = new Set()
+      for (const c of listCombos()) {
+        if (c.presetId === presetId) continue
+        for (const id of c.servers) stillUsed.add(id)
+      }
+
+      const removed = presetFile.removePresetRow(text, rowId)
+      if (!removed.removed) {
+        const err = new Error(`找不到会话模式 ${presetId}`)
+        err.statusCode = 404
+        throw err
+      }
+      let nextText = removed.text
+      const reenabled = []
+      for (const id of usedIds) {
+        if (stillUsed.has(id)) continue
+        const toggled = patchFile.setEntryDisabled(nextText, id, false)
+        if (toggled.changed) {
+          nextText = toggled.text
+          reenabled.push(id)
+        }
+      }
+      // 删除场景：preset 行已经没了，不能再要求它存在；只做整体结构自检。
+      const written = writePatchText(nextText, null, null)
+      if (!written) {
+        const err = new Error('写入校验失败')
+        err.statusCode = 500
+        throw err
+      }
+      const applied = await reloadHost()
+      return {
+        ok: true,
+        presetId,
+        reenabledGlobally: reenabled,
+        applied,
+        note: applied === 'applied'
+          ? '会话模式已删除并已重新加载。' + (reenabled.length > 0 ? ' 这些服务器已恢复全局启用：' + reenabled.join('、') : '')
+          : '会话模式已从 profile 删除，重启 DSH 后彻底消失。' + (reenabled.length > 0 ? ' 全局启用状态已恢复：' + reenabled.join('、') : ''),
+      }
+    }
+
+    /** 让 DSH 重新加载 profile（preset 列表才会刷新）。带超时兜底。 */
+    async function reloadHost() {
+      const manager = ctx.get('pluginManager')
+      if (!manager || typeof manager.reload !== 'function') return 'unsupported'
+      try {
+        await withTimeout(manager.reload(), mutateTimeoutMs, 'pluginManager.reload')
+        return 'applied'
+      } catch (e) {
+        log('warn', `[mcp-manager] 重新加载 profile 未完成：${messageOf(e)}`)
+        return 'timeout'
+      }
+    }
+
     // ── 路由注册 ──────────────────────────────────────────────────────────
     const routes = {
       [`${ROUTE_PREFIX}/state`]: async () => buildState(),
@@ -594,6 +876,16 @@ module.exports = {
       [`${ROUTE_PREFIX}/save`]: async (body) => withLock(() => saveServer(body)),
       [`${ROUTE_PREFIX}/remove`]: async (body) => withLock(() => removeServer(body)),
       [`${ROUTE_PREFIX}/toggle`]: async (body) => withLock(() => toggleServer(body)),
+      [`${ROUTE_PREFIX}/combos`]: async (body) => {
+        if (!body || typeof body !== 'object' || body.action === undefined) {
+          return { ok: true, combos: listCombos(), bases: presetSpec.BASE_PRESETS }
+        }
+        if (body.action === 'save') return withLock(() => saveCombo(body))
+        if (body.action === 'remove') return withLock(() => removeCombo(body))
+        const err = new Error(`未知 action：${body.action}`)
+        err.statusCode = 400
+        throw err
+      },
       [`${ROUTE_PREFIX}/refresh`]: async () => {
         const profile = resolveProfile(true)
         return { ok: true, profile: { dir: profile.dir, source: profile.source, file: profile.file } }

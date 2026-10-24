@@ -7,6 +7,7 @@ DSH（DeepSeek Harness）插件：在桌面端设置页里管理 MCP 服务器�
 - `src/index.js` — host 半边，Cordis 插件（`module.exports = { name, inject, apply(ctx, config) }`）。`inject: ['webServer']`，可选使用 `ctx.get('pluginManager')`、`ctx.get('configEditor')`。包入口（`package.json` → `main`）。
 - `src/patch-file.js` / `src/yaml-mini.js` — 纯逻辑：扫描 `cordis.patch.yml`、按行增删改条目；自带最小 YAML 读写（**不要**为了省事引入 `yaml`/`js-yaml`，零依赖是刻意选择，见下）。
 - `src/validate.js` — 表单校验与配置规范化，字段与默认值必须对齐已安装的 `@deepseek-ai/dsh-mcp-client` 的 Schemastery schema。
+- `src/preset-file.js` / `src/preset-spec.js` — 会话模式：在 profile patch 里增删改 `@deepseek-ai/dsh-agent-preset` 声明、从官方 bundle 复制基础组合的插件块。
 - `src/locate.js` — profile 目录定位。
 - `client/bundle.js` — 浏览器半边，**手写** bundle，遵循 client-modules 协议（`window.__ModuleLoader__.load({ id, factory(require) })`），导出 `inject = ['slots']` 与 `apply(ctx)`；注册到根级 `settings.section`（id `mcp-manager`，label `MCP 服务器`）。无构建步骤：保持 ES5 风格（`var` + `function` + `React.createElement`，不用 JSX / 箭头函数 / 模板字符串）。
 - `cordis.patch.yml` — `dsh.bundle.patch`：通过 `dsh plugin add` 安装时把插件条目插入 profile 的 host 组合。必须留在 host 平面（它读 `webServer`）。
@@ -26,11 +27,17 @@ DSH（DeepSeek Harness）插件：在桌面端设置页里管理 MCP 服务器�
 - 客户端 bundle **只允许** `require('react')`；测试里有一条断言盯着这一点。
 - **客户端配色只走 `--dsw-alias-*` token，禁止写死前景色，也不要用填充式主按钮。** 官方主题表里 `--dsw-alias-brand-primary` 在**暗色**下是近白色（`neutral-bluish-50`）、**浅色**下是近黑色（`bluish-1000`）—— 它不是「品牌蓝」，拿它当按钮底色在暗色下就是一块白板（历史 bug：还配了写死的 `color:#fff` → 白底白字；而通用 `.mm-btn:hover:not(:disabled)` 特异性 (0,3,0) 高于变体规则，只有鼠标悬停时才「碰巧」看得见文字）。现在所有按钮统一走描边款 `.mm-btn`。surface 的 token 兜底也要用主题中性色（不能是 `#fff`/`#fafafa`）。
 
+- **会话模式必须用 `- insert:` 块写 preset，不能用顶层 `- id:`。** profile patch 顶层 `- id:` 是「覆盖已有 entry」语义，新增会被 DSH 报 `patch: entry "..." not found`。`src/preset-file.js` 的 `upsertPresetRow` 已按此实现。
+- **preset 的 `plugins` 是完整组合，不继承 Host 工具。** 生成时必须把基础组合（官方 `dsh-web-app/presets/<base>.patch.yml` 里 `preset-<base>` 的 plugins 块）整体复制过来，再追加 MCP 行 —— 否则选了这个模式就没有读写文件/bash 等常规工具。基础块用 `preset-spec.extractPluginsBlock` 按文本切片，**不要**解析后重 dump（会丢 `!!js` 与 group/isolate）。
+- **缩进层级固定**：insert(0) → 条目 `- id:`(4) → `config:`(6) → `plugins:`(8) → 元素(10)。基础块与 MCP 行都必须经 `composePluginsLines` 统一重排到 10 列；两边各自加缩进会错位，DSH 直接 `YAMLException`。
+- **加入组合的服务器必须在全局停用**（顶层 `- id: X` + `disabled: true`），否则它同时以全局条目加载 = 所有会话都有，正好是反效果。删除组合时（且无其它组合引用）要恢复启用。
+- **`removeEntry` 的行号必须先算后删。** `splice` 之后所有行号偏移，再拿旧的 `blockStart/blockEnd` 删块会切断后面的块（历史 bug：两个组合并存时删第一个，第二个被整段吃掉）。测试 `preset-file.test.js` 有对应回归用例。
+
 ## Build / verify
 
 ```powershell
 npm run check   # node --check × 6
-npm test        # node --test test/*.test.js（64 个用例，无需 node_modules）
+npm test        # node --test test/*.test.js（79 个用例，无需 node_modules）
 ```
 
 测试不联网、不写用户的真实 profile：`test/host.test.js` 用 mock ctx + `os.tmpdir()` 里的临时 profile；`test/real-profile.test.js` 对真实 `cordis.patch.yml` **只读**（做一次"编辑后删除"的内存模拟，不落盘）。

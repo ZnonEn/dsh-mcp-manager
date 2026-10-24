@@ -29,8 +29,13 @@ test('真实 profile：能读出 mcp-comfy 条目且字段与文件一致', { sk
   assert.equal(comfy.config.transport, 'stdio')
   assert.match(comfy.config.command, /comfy-mcp\.exe$/)
   assert.match(comfy.config.env.COMFY_BIN, /comfy\.exe$/)
-  assert.equal(comfy.config.toolCallTimeoutMs, 600000)
-  assert.equal(comfy.config.failOnStartupError, true)
+  // 可选字段只断言「有值时类型正确」—— 用户的配置会变，测试不该绑定具体取值
+  if (comfy.config.toolCallTimeoutMs !== undefined) {
+    assert.equal(typeof comfy.config.toolCallTimeoutMs, 'number')
+  }
+  if (comfy.config.failOnStartupError !== undefined) {
+    assert.equal(typeof comfy.config.failOnStartupError, 'boolean')
+  }
 })
 
 test('真实 profile：对文件做一次「编辑后删除」的写操作模拟，不落盘', { skip: !exists && '未找到真实的 cordis.patch.yml' }, () => {
@@ -68,9 +73,12 @@ test('真实 profile：编辑已有条目后仍是合法结构（内存模拟，
   const entries = pf.listMcpEntries(edited.text)
   assert.deepEqual(entries.map((e) => e.id), ['mcp-comfy'])
   assert.deepEqual(entries[0].config.args, ['--stdio'])
-  // 其它顶层项与注释仍在
-  assert.match(edited.text, /# Your patch layer for this dsh profile/)
-  assert.match(edited.text, /- id: ui-theme/)
+  // 其它内容仍在：注释行数不变、顶层条目 id 集合不变
+  // （不硬编码具体条目名 —— 用户的 profile 会变，测试不该跟着坏）
+  const commentCount = (t) => t.split('\n').filter((l) => /^\s*#/.test(l)).length
+  assert.equal(commentCount(edited.text), commentCount(text), '注释行数应保持不变')
+  const topIds = (t) => new Set([...t.matchAll(/^- id:\s*['"]?([^'"\n]+?)['"]?\s*$/gm)].map((m) => m[1].trim()))
+  assert.deepEqual([...topIds(edited.text)].sort(), [...topIds(text)].sort(), '顶层条目集合应保持不变')
 })
 
 test('真实 profile：locateProfileDir 在无 argv 时靠回退链定位', { skip: !exists && '未找到真实的 cordis.patch.yml' }, () => {

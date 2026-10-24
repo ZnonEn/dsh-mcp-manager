@@ -173,7 +173,20 @@ function readEntry(lines, item, itemIndent, keyIndent) {
       entry.parseError = '条目不是一个映射'
     }
   } catch (e) {
+    // 解析失败（典型：条目里含 `!!js` 表达式或 group 结构，yaml-mini 不支持）。
+    // 行范围仍然有效，但 id / name 必须用正则兜底读出来 —— 否则条目会变成
+    // 「查不到、删不掉、也无法判定它是哪个插件」的孤儿。
     entry.parseError = String((e && e.message) || e)
+    const head = stripComment(lines[item.start]).trimEnd().slice(itemIndent)
+    const mId = /^-\s+id:\s*['"]?([^'"\n]+?)['"]?\s*$/.exec(head)
+    if (mId) entry.id = mId[1].trim()
+    for (let i = item.start + 1; i < item.end; i++) {
+      const raw = stripComment(lines[i]).trimEnd()
+      if (raw === '') continue
+      if (indentOf(raw) !== keyIndent) continue
+      const mName = /^name:\s*['"]?([^'"\n]+?)['"]?\s*$/.exec(raw.slice(keyIndent))
+      if (mName) { entry.moduleName = mName[1].trim(); break }
+    }
   }
   return entry
 }
@@ -260,19 +273,27 @@ function removeEntry(text, id) {
   const existing = scanned.entries.find((e) => e.id === id)
   if (!existing) return { text: String(text), removed: false }
   const lines = scanned.lines.slice()
-  lines.splice(existing.start, existing.end - existing.start)
 
+  // 先判断「删掉这个条目后，它所在的 insert 块会不会变空」——
+  // 必须在 splice 之前算好：splice 之后所有行号都会偏移，
+  // 再拿旧的 blockStart/blockEnd 去删块会误删后面的块（历史 bug：
+  // 两个组合并存时删掉第一个，第二个的内容被整段切掉）。
   const block = scanned.inserts.find((b) => existing.start >= b.blockStart && existing.start < b.blockEnd)
+  let removeBlock = false
   if (block) {
     const stillHasItem = scanned.entries.some(
       (e) => e.id !== existing.id && e.start >= block.blockStart && e.start < block.blockEnd,
     )
-    if (!stillHasItem) {
-      // 块内已无条目：删除整个顶层块，避免留下空的 `- insert:`
-      let end = block.blockEnd
-      lines.splice(block.blockStart, end - block.blockStart)
-    }
+    removeBlock = !stillHasItem
   }
+
+  if (removeBlock) {
+    // 块与条目一起删，一次 splice 完成（行号都是同一次扫描得到的，安全）
+    lines.splice(block.blockStart, block.blockEnd - block.blockStart)
+  } else {
+    lines.splice(existing.start, existing.end - existing.start)
+  }
+
   if (!hasTopLevelItem(lines) && findEmptyFlowArrayLine(lines) < 0) {
     // 文件里已经没有任何条目了：补一个合法的空数组字面量，
     // 让 patch 文件始终是「顶层数组」而不是空文档。

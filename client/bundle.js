@@ -33,6 +33,9 @@ window.__ModuleLoader__.load({
        * 所有按钮统一走描边款，跟设置页里其它按钮一致。 */
       ".mm-btn-danger { color:var(--dsw-alias-state-error-primary, #d64545); border-color:var(--dsw-alias-state-error-primary, #d64545); }",
       ".mm-btn-sm { padding:4px 10px; font-size:12px; border-radius:7px; }",
+      /* 选中态只描边+加粗，绝不填充（暗色主题下 brand-primary 是近白色，填充会变白板） */
+      ".mm-btn-accent { border-color:var(--dsw-alias-brand-primary, #4f8cff); font-weight:600; }",
+      ".mm-section { border-top:1px solid var(--dsw-alias-border-l1, #eee); padding-top:14px; display:flex; flex-direction:column; gap:10px; }",
       ".mm-notice { border:1px solid var(--dsw-alias-border-l2, #e5e5e5); border-left:3px solid var(--dsw-alias-brand-primary, #4f8cff); border-radius:6px; padding:8px 12px; font-size:12px; background:var(--dsw-alias-bg-layer-1, rgba(127,127,127,.12)); line-height:1.6; }",
       ".mm-warn { border-left-color:var(--dsw-alias-state-warn-primary, #d6913f); }",
       ".mm-err { border-left-color:var(--dsw-alias-state-error-primary, #d64545); }",
@@ -342,6 +345,153 @@ window.__ModuleLoader__.load({
       )
     }
 
+    /**
+     * 「会话模式」区块：把选定的几个 MCP 服务器打包成一个 agent preset，
+     * 新建会话时选择该模式即可让这些 MCP 只对该会话生效。
+     */
+    function ComboSection(props) {
+      var combos = props.combos || []
+      var servers = props.servers || []
+      var bases = props.bases || ["standard"]
+      var busy = props.busy
+      var pickHook = React.useState([])
+      var picked = pickHook[0]
+      var setPicked = pickHook[1]
+      var nameHook = React.useState("")
+      var name = nameHook[0]
+      var setName = nameHook[1]
+      var baseHook = React.useState(bases[0] || "standard")
+      var base = baseHook[0]
+      var setBase = baseHook[1]
+      var openHook = React.useState(false)
+      var open = openHook[0]
+      var setOpen = openHook[1]
+
+      var usable = servers.filter(function (s) { return !s.external && !s.parseError && s.config })
+
+      function togglePick(id) {
+        setPicked(function (prev) {
+          var idx = prev.indexOf(id)
+          if (idx >= 0) { var next = prev.slice(); next.splice(idx, 1); return next }
+          return prev.concat([id])
+        })
+      }
+
+      function create() {
+        if (picked.length === 0) return
+        var presetId = (name || "").trim() || null
+        if (!presetId) {
+          // 没填名字就用服务器名拼一个稳定的 id
+          presetId = picked.map(function (id) {
+            var hit = usable.filter(function (s) { return s.id === id })[0]
+            var sn = hit && hit.config && hit.config.serverName ? hit.config.serverName : id
+            return String(sn).replace(/[^A-Za-z0-9_-]/g, "-")
+          }).join("-")
+        }
+        props.onCreate({
+          presetId: String(presetId).replace(/[^A-Za-z0-9_-]/g, "-"),
+          name: (name || "").trim() || ("标准 + " + picked.length + " 个 MCP"),
+          base: base,
+          serverIds: picked
+        })
+        setName("")
+        setPicked([])
+        setOpen(false)
+      }
+
+      return React.createElement("div", { className: "mm-section" },
+        React.createElement("div", { className: "mm-card-main" },
+          React.createElement("div", null,
+            React.createElement("div", { className: "mm-name" }, "会话模式"),
+            React.createElement("div", { className: "mm-desc" },
+              "把选定的 MCP 打包成一个模式。新建会话时选它，这些 MCP 只对该会话生效；不选则完全不加载。"
+            )
+          ),
+          React.createElement("div", { className: "mm-actions" },
+            React.createElement("button", { className: "mm-btn mm-btn-sm", disabled: busy || usable.length === 0, onClick: function () { setOpen(!open) } },
+              open ? "收起" : "新建模式")
+          )
+        ),
+        open ? React.createElement("div", { className: "mm-form" },
+          React.createElement("div", { className: "mm-field" },
+            React.createElement("label", { className: "mm-label" }, "选择服务器"),
+            React.createElement("div", { className: "mm-row-actions" },
+              usable.length === 0
+                ? React.createElement("span", { className: "mm-hint" }, "还没有可用的服务器，先在上面新增一个。")
+                : usable.map(function (s) {
+                  var sel = picked.indexOf(s.id) >= 0
+                  return React.createElement("button", {
+                    key: s.id,
+                    className: "mm-btn mm-btn-sm" + (sel ? " mm-btn-accent" : ""),
+                    disabled: busy,
+                    onClick: function () { togglePick(s.id) }
+                  }, (sel ? "✓ " : "") + ((s.config && s.config.serverName) || s.id))
+                })
+            )
+          ),
+          React.createElement("div", { className: "mm-grid" },
+            React.createElement("div", { className: "mm-field" },
+              React.createElement("label", { className: "mm-label" }, "模式名（可留空）"),
+              React.createElement("input", {
+                className: "mm-input",
+                value: name,
+                placeholder: "例如：ComfyUI 会话",
+                onChange: function (e) { setName(e.target.value) }
+              })
+            ),
+            React.createElement("div", { className: "mm-field" },
+              React.createElement("label", { className: "mm-label" }, "基础组合"),
+              React.createElement("select", {
+                className: "mm-select",
+                value: base,
+                onChange: function (e) { setBase(e.target.value) }
+              }, bases.map(function (b) {
+                return React.createElement("option", { key: b, value: b }, b)
+              }))
+            )
+          ),
+          React.createElement("div", { className: "mm-hint" },
+            "基础组合提供常规工具（读写文件、bash、计划模式等），MCP 会追加在它后面。"
+          ),
+          React.createElement("div", { className: "mm-foot" },
+            React.createElement("button", { className: "mm-btn", disabled: busy, onClick: function () { setOpen(false); setPicked([]) } }, "取消"),
+            React.createElement("button", { className: "mm-btn", disabled: busy || picked.length === 0, onClick: create },
+              busy ? "保存中…" : "创建模式（" + picked.length + " 个服务器）")
+          )
+        ) : null,
+
+        combos.length === 0
+          ? React.createElement("div", { className: "mm-empty" }, "还没有会话模式。新建一个后，新建会话时就能在模式列表里选择。")
+          : React.createElement("div", { className: "mm-list" },
+            combos.map(function (c) {
+              return React.createElement("div", { className: "mm-card", key: c.rowId },
+                React.createElement("div", { className: "mm-card-main" },
+                  React.createElement("div", null,
+                    React.createElement("div", { className: "mm-name" }, c.name || c.presetId),
+                    React.createElement("div", { className: "mm-id" }, "模式 id：" + c.presetId + " · " + (c.pluginCount || 0) + " 个插件")
+                  ),
+                  React.createElement("div", { className: "mm-row-actions" },
+                    React.createElement("button", {
+                      className: "mm-btn mm-btn-sm mm-btn-danger",
+                      disabled: busy,
+                      onClick: function () { props.onRemove(c.presetId) }
+                    }, "删除")
+                  )
+                ),
+                React.createElement("div", { className: "mm-meta" },
+                  React.createElement("span", { className: "mm-meta-key" }, "含服务器"),
+                  React.createElement("span", { className: "mm-mono" }, (c.servers || []).join(", ") || "—")
+                )
+              )
+            })
+          ),
+
+        React.createElement("div", { className: "mm-hint" },
+          "模式只能在「还没发过消息的新会话」里选择（DSH 的限制）。已有对话想换工具集，需要新开会话。"
+        )
+      )
+    }
+
     function Panel() {
       var stateHook = React.useState(null)
       var data = stateHook[0]
@@ -438,7 +588,31 @@ window.__ModuleLoader__.load({
           .then(function () { setBusy(false) })
       }
 
+      function createCombo(payload) {
+        setBusy(true)
+        api("/combos", Object.assign({ action: "save" }, payload))
+          .then(function (res) {
+            setNotice(res.note || "会话模式已创建。")
+            return load(true)
+          })
+          .catch(function (e) { setError(e.message) })
+          .then(function () { setBusy(false) })
+      }
+
+      function removeCombo(presetId) {
+        setBusy(true)
+        api("/combos", { action: "remove", presetId: presetId })
+          .then(function (res) {
+            setNotice(res.note || "会话模式已删除。")
+            return load(true)
+          })
+          .catch(function (e) { setError(e.message) })
+          .then(function () { setBusy(false) })
+      }
+
       var servers = data && data.servers ? data.servers.filter(function (s) { return s.external !== true }) : []
+      var combos = data && data.combos ? data.combos : []
+      var comboBases = data && data.comboBases ? data.comboBases : ["standard"]
       var counts = data && data.counts ? data.counts : null
       var profile = data && data.profile ? data.profile : null
       var warnings = data && data.warnings ? data.warnings : []
@@ -517,6 +691,15 @@ window.__ModuleLoader__.load({
                 onRemoveConfirm: function () { remove(server.id) }
               })
             })),
+
+        React.createElement(ComboSection, {
+          combos: combos,
+          servers: servers,
+          bases: comboBases,
+          busy: busy,
+          onCreate: createCombo,
+          onRemove: removeCombo
+        }),
 
         React.createElement("div", { className: "mm-desc" },
           "说明：新增、编辑、删除会直接改写 profile 的 cordis.patch.yml（改动前自动备份，最多保留 10 份 .bak-mcp-manager-*）。",

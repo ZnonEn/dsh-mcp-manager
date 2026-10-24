@@ -36,7 +36,7 @@
     "LICENSE"
   ],
   "scripts": {
-    "check": "node --check src/index.js && node --check src/patch-file.js && node --check src/yaml-mini.js && node --check src/validate.js && node --check src/locate.js && node --check client/bundle.js",
+    "check": "node --check src/index.js && node --check src/patch-file.js && node --check src/yaml-mini.js && node --check src/validate.js && node --check src/locate.js && node --check src/preset-file.js && node --check src/preset-spec.js && node --check client/bundle.js",
     "test": "node --test test/*.test.js"
   },
   "engines": {
